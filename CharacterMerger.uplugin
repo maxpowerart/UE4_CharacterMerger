@@ -1,0 +1,33 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "CharacterMerger",
+	"Description": "",
+	"Category": "Other",
+	"CreatedBy": "maxpowerart",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "CharacterMerger",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "CharacterMergerEditor",
+			"Type": "Editor",
+			"LoadingPhase": "PostEngineInit"
+		},		{
+			"Name": "RuntimeSkeletalMeshGenerator",
+			"Type": "Runtime",
+			"LoadingPhase": "PreEarlyLoadingScreen"
+		}
+	]
+}
