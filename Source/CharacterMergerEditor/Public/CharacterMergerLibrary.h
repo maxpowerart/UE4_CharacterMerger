@@ -10,10 +10,303 @@
 #include "Rendering/SkeletalMeshRenderData.h"
 #include "Rendering/SkeletalMeshLODRenderData.h"
 #include "RuntimeSkeletalMeshGenerator/RuntimeSkeletalMeshGenerator.h"
+#include "RuntimeSkeletalMeshGenerator/RuntimeSkeletonBoneTransformExtractor.h"
 
 static FString DefaultRoot = "/Game/";
 static FString DefaultSavePath = "MergedSource/";
 static FString DefaultSaveName = "MergedStaticMesh";
+
+struct FSkelMeshRenderSection;
+
+struct FCMRefPoseOverride
+{
+
+	enum EBoneOverrideMode
+	{
+		BoneOnly,			// Override the bone only.
+		ChildrenOnly,		// Override the bone's children only.
+		BoneAndChildren,	// Override both the bone & children.
+		MAX,
+	};
+
+	/**
+	 * Constructs a FRefPoseOverride.
+	 */
+	FCMRefPoseOverride(const USkeletalMesh* ReferenceMesh)
+	{
+		this->SkeletalMesh = ReferenceMesh;
+	}
+
+	/**
+	 * Adds a bone to the list of poses to override.
+	 */
+	void AddOverride(FName BoneName, EBoneOverrideMode OverrideMode = BoneOnly)
+	{
+		FCMBoneOverrideInfo OverrideInfo;
+		OverrideInfo.BoneName = BoneName;
+		OverrideInfo.OverrideMode = OverrideMode;
+
+		Overrides.Add(OverrideInfo);
+	}
+	
+	struct FCMBoneOverrideInfo
+	{
+		/** The names of the bone to override. */
+		FName BoneName;
+
+		/** Whether the override applies to the bone, bone's children, or both. */
+		EBoneOverrideMode OverrideMode;
+	};
+
+	/** The skeletal mesh that contains the reference pose. */
+	const USkeletalMesh* SkeletalMesh;
+
+	/** The list of bone overrides. */
+	TArray<FCMBoneOverrideInfo> Overrides;
+};
+
+/** 
+* Info to map all the sections from a single source skeletal mesh to 
+* a final section entry int he merged skeletal mesh
+*/
+struct FCMSkelMeshMergeSectionMapping
+{
+	/** indices to final section entries of the merged skel mesh */
+	TArray<int32> SectionIDs;
+};
+
+/** 
+* Info to map all the sections about how to transform their UVs
+*/
+struct FCMSkelMeshMergeUVTransforms
+{
+	/** For each UV channel on each mesh, how the UVS should be transformed. */
+	TArray<TArray<FTransform>> UVTransformsPerMesh;
+};
+
+class FCMSkeletalMeshMerge
+{
+public:
+	/**
+	* Constructor
+	* @param InMergeMesh - destination mesh to merge to
+	* @param InSrcMeshList - array of source meshes to merge
+	* @param InForceSectionMapping - optional array to map sections from the source meshes to merged section entries
+	* @param StripTopLODs - number of high LODs to remove from input meshes
+    * @param bMeshNeedsCPUAccess - (optional) if the resulting mesh needs to be accessed by the CPU for any reason (e.g. for spawning particle effects).
+	* @param UVTransforms - optional array to transform the UVs in each mesh
+	*/
+	FCMSkeletalMeshMerge( 
+		USkeletalMesh* InMergeMesh, 
+		const TArray<USkeletalMesh*>& InSrcMeshList, 
+		const TArray<FCMSkelMeshMergeSectionMapping>& InForceSectionMapping,
+		int32 InStripTopLODs,
+        EMeshBufferAccess InMeshBufferAccess=EMeshBufferAccess::Default,
+		FCMSkelMeshMergeUVTransforms* InSectionUVTransforms = nullptr
+		);
+
+	/**
+	 * Merge/Composite skeleton and meshes together from the list of source meshes.
+	 * @param RefPoseOverrides - An optional override for the merged skeleton's reference pose.
+	 * @return true if succeeded
+	 */
+	bool DoMerge(TArray<FCMRefPoseOverride>* RefPoseOverrides = nullptr);
+
+	/**
+	 * Create the 'MergedMesh' reference skeleton from the skeletons in the 'SrcMeshList'.
+	 * Use when the reference skeleton is needed prior to finalizing the merged meshes (do not use with DoMerge()).
+	 * @param RefPoseOverrides - An optional override for the merged skeleton's reference pose.
+	 */
+	void MergeSkeleton(const TArray<FCMRefPoseOverride>* RefPoseOverrides = nullptr);
+
+	/**
+	 * Creates the merged mesh from the 'SrcMeshList' (note, this should only be called after MergeSkeleton()).
+ 	 * Use when the reference skeleton is needed prior to finalizing the merged meshes (do not use with DoMerge()).
+	 * @return 'true' if successful; 'false' otherwise.
+	 */
+	bool FinalizeMesh();
+
+	/** Destination merged mesh */
+	USkeletalMesh* MergeMesh;
+	
+	/** Array of source skeletal meshes  */
+	TArray<USkeletalMesh*> SrcMeshList;
+
+	TMap<FName, TMap<int32, FVector>> MergedMorphMap;
+
+	/** Number of high LODs to remove from input meshes. */
+	int32 StripTopLODs;
+
+    /** Whether or not the resulting mesh needs to be accessed by the CPU (e.g. for particle spawning).*/
+    EMeshBufferAccess MeshBufferAccess;
+
+	/** Info about source mesh used in merge. */
+	struct FCMMergeMeshInfo
+	{
+		/** Mapping from RefSkeleton bone index in source mesh to output bone index. */
+		TArray<int32> SrcToDestRefSkeletonMap;
+
+		TMap<FName, TMap<int32, FVector>> MorphMap;
+	};
+
+	/** Array of source mesh info structs. */
+	TArray<FCMMergeMeshInfo> SrcMeshInfo;
+
+	/** New reference skeleton, made from creating union of each part's skeleton. */
+	FReferenceSkeleton NewRefSkeleton;
+
+	/** array to map sections from the source meshes to merged section entries */
+	const TArray<FCMSkelMeshMergeSectionMapping>& ForceSectionMapping;
+
+	/** optional array to transform UVs in each source mesh */
+	const FCMSkelMeshMergeUVTransforms* SectionUVTransforms;
+
+	/** Matches the Materials array in the final mesh - used for creating the right number of Material slots. */
+	TArray<int32>	MaterialIds;
+
+	/** keeps track of an existing section that need to be merged with another */
+	struct FCMMergeSectionInfo
+	{
+		/** ptr to source skeletal mesh for this section */
+		const USkeletalMesh* SkelMesh;
+		/** ptr to source section for merging */
+		const FSkelMeshRenderSection* Section;
+		/** mapping from the original BoneMap for this sections chunk to the new MergedBoneMap */
+		TArray<FBoneIndexType> BoneMapToMergedBoneMap;
+		/** transform from the original UVs */
+		TArray<FTransform> UVTransforms;
+
+		FCMMergeSectionInfo( const USkeletalMesh* InSkelMesh,const FSkelMeshRenderSection* InSection, TArray<FTransform> & InUVTransforms )
+			:	SkelMesh(InSkelMesh)
+			,	Section(InSection)
+			,	UVTransforms(InUVTransforms)
+		{}
+	};
+
+	/** info needed to create a new merged section */
+	struct FCMNewSectionInfo
+	{
+		/** array of existing sections to merge */
+		TArray<FCMMergeSectionInfo> MergeSections;
+		/** merged bonemap */
+		TArray<FBoneIndexType> MergedBoneMap;
+		/** material for use by this section */
+		UMaterialInterface* Material;
+		
+		/** 
+		* if -1 then we use the Material* to match new section entries
+		* otherwise the MaterialId is used to find new section entries
+		*/
+		int32 MaterialId;
+
+		/** material slot name, if multiple section use the same material we use the first slot name found */
+		FName SlotName;
+
+		/** Default UVChannelData for new sections. Will be recomputed if necessary */
+		FMeshUVChannelInfo UVChannelData;
+
+		FCMNewSectionInfo( UMaterialInterface* InMaterial, int32 InMaterialId, FName InSlotName, const FMeshUVChannelInfo& InUVChannelData )
+			:	Material(InMaterial)
+			,	MaterialId(InMaterialId)
+			,	SlotName(InSlotName)
+			,	UVChannelData(InUVChannelData)
+		{}
+	};
+
+	/**
+	* Merge a bonemap with an existing bonemap and keep track of remapping
+	* (a bonemap is a list of indices of bones in the USkeletalMesh::RefSkeleton array)
+	* @param MergedBoneMap - out merged bonemap
+	* @param BoneMapToMergedBoneMap - out of mapping from original bonemap to new merged bonemap 
+	* @param BoneMap - input bonemap to merge
+	*/
+	void MergeBoneMap( TArray<FBoneIndexType>& MergedBoneMap, TArray<FBoneIndexType>& BoneMapToMergedBoneMap, const TArray<FBoneIndexType>& BoneMap );
+
+	/**
+	* Creates a new LOD model and adds the new merged sections to it. Modifies the MergedMesh.
+	* @param LODIdx - current LOD to process
+	*/
+	template<typename VertexDataType>
+	void GenerateLODModel( int32 LODIdx);
+	
+	/**
+	* Generate the list of sections that need to be created along with info needed to merge sections
+	* @param NewSectionArray - out array to populate
+	* @param LODIdx - current LOD to process
+	*/
+	void GenerateNewSectionArray( TArray<FCMNewSectionInfo>& NewSectionArray, int32 LODIdx );
+
+	/**
+	* (Re)initialize and merge skeletal mesh info from the list of source meshes to the merge mesh
+	* @return true if succeeded
+	*/
+	bool ProcessMergeMesh();
+
+	/**
+	 * Returns the number of LODs that can be supported by the meshes in 'SourceMeshList'.
+	 */
+	int32 CalculateLodCount(const TArray<USkeletalMesh*>& SourceMeshList) const;
+
+	/**
+	 * Builds a new 'RefSkeleton' from the reference skeletons in the 'SourceMeshList'.
+	 */
+	static void BuildReferenceSkeleton(const TArray<USkeletalMesh*>& SourceMeshList, FReferenceSkeleton& RefSkeleton, const USkeleton* SkeletonAsset);
+
+	/**
+	 * Overrides the 'TargetSkeleton' bone poses with the bone poses specified in the 'PoseOverrides' array.
+	 */
+	static void OverrideReferenceSkeletonPose(const TArray<FCMRefPoseOverride>& PoseOverrides, FReferenceSkeleton& TargetSkeleton, const USkeleton* SkeletonAsset);
+
+	/**
+	 * Override the 'TargetSkeleton' bone pose with the pose from from the 'SourceSkeleton'.
+	 * @return 'true' if the override was successful; 'false' otherwise.
+	 */
+	static bool OverrideReferenceBonePose(int32 SourceBoneIndex, const FReferenceSkeleton& SourceSkeleton, FReferenceSkeletonModifier& TargetSkeleton);
+
+	/**
+	 * Releases any resources the 'MergeMesh' is currently holding.
+	 */
+	void ReleaseResources(int32 Slack = 0);
+
+	/**
+	 * Copies and adds the 'NewSocket' to the MergeMesh's MeshOnlySocketList only if the socket does not already exist.
+	 * @return 'true' if the socket is added; 'false' otherwise.
+	 */
+	bool AddSocket(const USkeletalMeshSocket* NewSocket, bool bIsSkeletonSocket);
+
+	/**
+	 * Adds only the new sockets from the 'NewSockets' array to the 'ExistingSocketList'.
+	 */
+	void AddSockets(const TArray<USkeletalMeshSocket*>& NewSockets, bool bAreSkeletonSockets);
+
+	/**
+	 * Builds a new 'SocketList' from the sockets in the 'SourceMeshList'.
+	 */
+	void BuildSockets(const TArray<USkeletalMesh*>& SourceMeshList);
+
+	//void OverrideSockets(const TArray<FRefPoseOverride>& PoseOverrides);
+
+	/**
+	 * Override the corresponding 'MergeMesh' socket with 'SourceSocket'.
+	 */
+	void OverrideSocket(const USkeletalMeshSocket* SourceSocket);
+
+	/**
+	 * Overrides the sockets attached to 'BoneName' with the corresponding socket in the 'SourceSocketList'.
+	 */
+	void OverrideBoneSockets(const FName& BoneName, const TArray<USkeletalMeshSocket*>& SourceSocketList);
+
+	/**
+	 * Overrides the sockets of overridden bones.
+	 */
+	void OverrideMergedSockets(const TArray<FCMRefPoseOverride>& PoseOverrides);
+
+	/*
+	 * Copy Vertex Buffer from Source LOD Model
+	 */
+	template<typename VertexDataType>
+	void CopyVertexFromSource(VertexDataType& DestVert, const FSkeletalMeshLODRenderData& SrcLODData, int32 SourceVertIdx, const FCMMergeSectionInfo& MergeSectionInfo, int32 NumVertexes);
+};
 
 class FCharacterMergerLibrary
 {
@@ -38,7 +331,6 @@ public:
 		{
 			return;
 		}
-
 		// Retrieve the imported resource structure and allocate a new LOD model
 		FSkeletalMeshModel* ImportedModel = CompositeMesh->GetImportedModel();
 		check(ImportedModel->LODModels.Num() == 0);
@@ -48,28 +340,165 @@ public:
 		CompositeMesh->ResetLODInfo();
 		CompositeMesh->AddLODInfo();
 
+		
+		/**Decompose meshes*/
 		TArray<FMeshSurface> Surfaces;
 		TArray<int32> SurfacesVertexOffsets;
 		TArray<int32> SurfacesIndexOffsets;
 		TArray<UMaterialInterface*> SurfacesMaterial;
-
 		FRuntimeSkeletalMeshGenerator::DecomposeSkeletalMesh(CompositeMesh, Surfaces, SurfacesVertexOffsets, SurfacesIndexOffsets, SurfacesMaterial);
-		
-		//DecomposeSkeletalMesh(CompositeMesh, Surfaces, SurfacesVertexOffsets, SurfacesIndexOffsets, SurfacesMaterial);
+		ParseMorphs(ComponentsToWeld[0], Surfaces[0]);
 
 		USkeletalMesh* RecompositeMesh = NewObject<USkeletalMesh>(Package, NAME_None, RF_Public | RF_Standalone);
-		RecompositeMesh->SetRefSkeleton(CompositeMesh->GetSkeleton()->GetReferenceSkeleton());
-		RecompositeMesh->SetSkeleton(CompositeMesh->GetSkeleton());
-		
-		//ParseMorphs(ComponentsToWeld[0], RecompositeMesh, Surfaces);
-		//GenerateSkeletalMesh(RecompositeMesh, Surfaces, SurfacesMaterial);
-		FRuntimeSkeletalMeshGenerator::GenerateSkeletalMesh(RecompositeMesh, Surfaces, SurfacesMaterial);
+		RecompositeMesh->SetRefSkeleton(ComponentsToWeld[0]->GetSkeleton()->GetReferenceSkeleton());
+		RecompositeMesh->SetSkeleton(ComponentsToWeld[0]->GetSkeleton());
 
+		/**Calc remapping for new skeleton*/
+		TArray<int32> Remapping;
+		if (CompositeMesh)
+		{
+			Remapping.AddUninitialized(CompositeMesh->GetRefSkeleton().GetRawBoneNum());
+
+			for (int32 i = 0; i < CompositeMesh->GetRefSkeleton().GetRawBoneNum(); i++)
+			{
+				FName SrcBoneName = CompositeMesh->GetRefSkeleton().GetBoneName(i);
+				int32 DestBoneIndex = RecompositeMesh->GetRefSkeleton().FindBoneIndex(SrcBoneName);
+
+				if (DestBoneIndex == INDEX_NONE)
+				{
+					// Missing bones shouldn't be possible, but can happen with invalid meshes;
+					// map any bone we are missing to the 'root'.
+
+					DestBoneIndex = 0;
+				}
+
+				Remapping[i] = DestBoneIndex;
+			}
+		}
+		
+		FRuntimeSkeletalMeshGenerator::GenerateSkeletalMesh(RecompositeMesh, CompositeMesh, Surfaces, SurfacesMaterial, Remapping);
+
+		/**Save*/
 		Package->SetDirtyFlag(true);
 		UEditorLoadingAndSavingUtils::SaveDirtyPackages(false, true);
 	};
 
-	static void ParseMorphs(USkeletalMesh* Source, USkeletalMesh* Target, TArray<FMeshSurface>& Surfaces)
+	static void CompareMeshRigging(USkeletalMesh* SourceMesh, USkeletalMesh* TargetMesh)
+	{
+		/**Compare skeleton mapping*/
+				const auto& SourceWeights = SourceMesh->GetResourceForRendering()->LODRenderData[0].SkinWeightVertexBuffer;
+		const auto& TargetWeights = TargetMesh->GetResourceForRendering()->LODRenderData[0].SkinWeightVertexBuffer;
+
+		check(SourceMesh->GetResourceForRendering()->LODRenderData[0].RequiredBones.Num() ==
+				TargetMesh->GetResourceForRendering()->LODRenderData[0].RequiredBones.Num());
+
+		for(int32 Iterator = 0; Iterator < SourceMesh->GetResourceForRendering()->LODRenderData[0].RequiredBones.Num(); Iterator++)
+		{
+			if(SourceMesh->GetResourceForRendering()->LODRenderData[0].RequiredBones[Iterator] !=
+				TargetMesh->GetResourceForRendering()->LODRenderData[0].RequiredBones[Iterator])
+			{
+				UE_LOG(LogTemp, Error, TEXT("Required bones definition at index %i"), Iterator);
+			}
+		}
+		for(int32 Iterator = 0; Iterator < SourceMesh->GetResourceForRendering()->LODRenderData[0].ActiveBoneIndices.Num(); Iterator++)
+		{
+			if(SourceMesh->GetResourceForRendering()->LODRenderData[0].ActiveBoneIndices[Iterator] !=
+				TargetMesh->GetResourceForRendering()->LODRenderData[0].ActiveBoneIndices[Iterator])
+			{
+				UE_LOG(LogTemp, Error, TEXT("Active bones definition at index %i"), Iterator);
+			}
+		}
+
+		TArray<FSkinWeightInfo> SourceWeightArr;
+		TArray<FSkinWeightInfo> TargetWeightArr;
+		SourceWeights.GetSkinWeights(SourceWeightArr);
+		TargetWeights.GetSkinWeights(TargetWeightArr);
+
+		check(SourceWeightArr.Num() == TargetWeightArr.Num());
+		int32 BonesDiff = 0;
+		int32 WeightsDiff = 0;
+		for(int32 Iterator = 0; Iterator < SourceWeightArr.Num(); Iterator++)
+			{
+				if(SourceWeightArr[Iterator].InfluenceBones != TargetWeightArr[Iterator].InfluenceBones ||
+					SourceWeightArr[Iterator].InfluenceWeights != TargetWeightArr[Iterator].InfluenceWeights)
+				{
+					for(int32 InternalIt = 0; InternalIt < 12; InternalIt++)
+					{
+						if(SourceWeightArr[Iterator].InfluenceBones[InternalIt] != TargetWeightArr[Iterator].InfluenceBones[InternalIt])
+						{
+							FString SourceBoneName = SourceMesh->GetSkeleton()->GetReferenceSkeleton().GetBoneName(
+								SourceWeightArr[Iterator].InfluenceBones[InternalIt]).ToString();
+							FString TargetBoneName = TargetWeightArr[Iterator].InfluenceBones[InternalIt] == 65535 ?
+								FString("which are invalid") :
+								TargetMesh->GetSkeleton()->GetReferenceSkeleton().GetBoneName(TargetWeightArr[Iterator].InfluenceBones[InternalIt]).ToString();
+							UE_LOG(LogTemp, Error, TEXT("Bone %s replaced with bone %s"), *SourceBoneName, *TargetBoneName);
+							BonesDiff+=1;
+						}
+						if(SourceWeightArr[Iterator].InfluenceWeights[InternalIt] != TargetWeightArr[Iterator].InfluenceWeights[InternalIt])
+						{
+							UE_LOG(LogTemp, Error, TEXT("Influence weights definition at index %i on bone %i"), Iterator, InternalIt);
+							WeightsDiff+=1;
+						}
+					}
+				}
+			}
+		UE_LOG(LogTemp, Error, TEXT("Weights diff: %i Bones diff: %i"), WeightsDiff, BonesDiff);
+		
+		TMap<FName, TArray<int32>> SourceBoneToVertexMapping;
+		TMap<FName, TArray<int32>> TargetBoneToVertexMapping;
+		const int32 BoneNum = SourceMesh->GetSkeleton()->GetReferenceSkeleton().GetNum();
+		for (int32 BoneIndex = 0; BoneIndex < BoneNum; BoneIndex++)
+		{
+			FName SourceName = SourceMesh->GetSkeleton()->GetReferenceSkeleton().GetBoneName(BoneIndex);
+			FName TargetName = TargetMesh->GetSkeleton()->GetReferenceSkeleton().GetBoneName(BoneIndex);
+			SourceBoneToVertexMapping.Add(SourceName);
+			TargetBoneToVertexMapping.Add(TargetName);
+
+			for(auto SourceWeightVertex : SourceWeightArr)
+			{
+				for(int32 Iterator = 0; Iterator < 12; Iterator++)
+				{
+					if(SourceWeightVertex.InfluenceBones[Iterator] == BoneIndex)
+					{
+						SourceBoneToVertexMapping[SourceName].Add(SourceWeightVertex.InfluenceBones[Iterator]);
+					}
+				}
+			}
+
+			for(auto TargetWeightVertex : TargetWeightArr)
+			{
+				for(int32 Iterator = 0; Iterator < 12; Iterator++)
+				{
+					if(TargetWeightVertex.InfluenceBones[Iterator] == BoneIndex)
+					{
+						TargetBoneToVertexMapping[SourceName].Add(TargetWeightVertex.InfluenceBones[Iterator]);
+					}
+				}
+			}
+		}
+		check(SourceBoneToVertexMapping.Num() == TargetBoneToVertexMapping.Num());
+
+		/**Compare render section*/
+		auto& SourceRenderSection = SourceMesh->GetResourceForRendering()->LODRenderData[0].RenderSections;
+		auto& TargetRenderSection = TargetMesh->GetResourceForRendering()->LODRenderData[0].RenderSections;
+
+		check(SourceRenderSection.Num() == TargetRenderSection.Num());
+		for(int32 Iterator = 0; Iterator < SourceRenderSection.Num(); Iterator++)
+		{
+			check(SourceRenderSection[Iterator].BoneMap == TargetRenderSection[Iterator].BoneMap);
+
+			for(int32 InternalIterator = 0; InternalIterator < SourceRenderSection[Iterator].BoneMap.Num(); InternalIterator++)
+			{
+				if(SourceRenderSection[Iterator].BoneMap[InternalIterator] != TargetRenderSection[Iterator].BoneMap[InternalIterator])
+				{
+					UE_LOG(LogTemp, Error, TEXT("Diffs in render section. Source is %i, target is %i"), SourceRenderSection[Iterator].BoneMap[InternalIterator],
+						TargetRenderSection[Iterator].BoneMap[InternalIterator]);
+				}
+			}
+		}
+	}
+	
+	static void ParseMorphs(USkeletalMesh* Source, FMeshSurface& Surfaces)
 	{
 		TArray<UMorphTarget*> MorphTargets = Source->GetMorphTargets();
 		for(UMorphTarget* MTSource : MorphTargets)
@@ -82,7 +511,7 @@ public:
 
 				for(int Iterator = 0; Iterator < NewDeltas.Num(); Iterator++)
 				{
-					Surfaces[0].Vertices[Iterator] += NewDeltas[Iterator].PositionDelta;
+					Surfaces.Vertices[Iterator] += NewDeltas[Iterator].PositionDelta;
 				}
 				/**Take this vertex
 				NewDeltas[0].SourceIdx
@@ -114,676 +543,5 @@ public:
 			Target->RegisterMorphTarget(NewMT);
 			Target->MarkPackageDirty();*/
 		}
-	}
-
-	static void GenerateSkeletalMesh(
-		USkeletalMesh* SkeletalMesh,
-		const TArray<FMeshSurface>& Surfaces,
-		const TArray<UMaterialInterface*>& SurfacesMaterial)
-	{
-		// Waits the rendering thread has done.
-		FlushRenderingCommands();
-
-		constexpr int32 LODIndex = 0;
-
-	#if WITH_EDITORONLY_DATA
-		FSkeletalMeshImportData ImportedModelData;
-	#endif
-
-		TArray<uint32> SurfaceVertexOffsets;
-		TArray<uint32> SurfaceIndexOffsets;
-		SurfaceVertexOffsets.SetNum(Surfaces.Num());
-		SurfaceIndexOffsets.SetNum(Surfaces.Num());
-
-		bool bUse16BitBoneIndex = false;
-		int32 MaxBoneInfluences = 0;
-		const int32 UVCount = Surfaces.Num() > 0 ? (Surfaces[0].Uvs.Num() > 0 ? Surfaces[0].Uvs[0].Num() : 0) : 0;
-
-		// Collect all the vertices and index for each surface.
-		TArray<FStaticMeshBuildVertex> StaticVertices;
-		TArray<FVector> Vertices;
-		TArray<uint32> Indices;
-		TArray<uint32> VertexSurfaceIndex;
-		{
-			int MaxBoneIndex = 0;
-			// First count all the vertices.
-			uint32 VerticesCount = 0;
-			uint32 IndicesCount = 0;
-			for (const FMeshSurface& Surface : Surfaces)
-			{
-				VerticesCount += Surface.Vertices.Num();
-				IndicesCount += Surface.Indices.Num();
-
-				for (const auto& Influences : Surface.BoneInfluences)
-				{
-					MaxBoneInfluences = FMath::Max(Influences.Num(), MaxBoneInfluences);
-					for (const auto& Influence : Influences)
-					{
-						MaxBoneIndex = FMath::Max(Influence.BoneIndex, MaxBoneIndex);
-					}
-				}
-
-	#if WITH_EDITOR
-				// Make sure all the surfaces and all the vertices have the same amount of
-				// UVs.
-				for (const TArray<FVector2D> Uvs : Surface.Uvs)
-				{
-					check(UVCount == Uvs.Num());
-				}
-	#endif
-			}
-
-			bUse16BitBoneIndex = MaxBoneIndex <= MAX_uint16;
-
-			StaticVertices.SetNum(VerticesCount);
-			Vertices.SetNum(VerticesCount);
-			VertexSurfaceIndex.SetNum(VerticesCount);
-			Indices.SetNum(IndicesCount);
-
-			uint32 VerticesOffset = 0;
-			uint32 IndicesOffset = 0;
-			for (int32 I = 0; I < Surfaces.Num(); I++)
-			{
-				const FMeshSurface& Surface = Surfaces[I];
-
-				for (int VertexIndex = 0; VertexIndex < Surface.Vertices.Num(); VertexIndex += 1)
-				{
-					if (Surface.Colors.Num() > 0)
-					{
-						StaticVertices[VerticesOffset + VertexIndex].Color = Surface.Colors[VertexIndex];
-					}
-					StaticVertices[VerticesOffset + VertexIndex].Position = Surface.Vertices[VertexIndex];
-					StaticVertices[VerticesOffset + VertexIndex].TangentX = Surface.Tangents[VertexIndex];
-					StaticVertices[VerticesOffset + VertexIndex].TangentY = FVector::CrossProduct(Surface.Normals[VertexIndex], Surface.Tangents[VertexIndex]) * (Surface.FlipBinormalSigns[VertexIndex] ? -1.0 : 1.0);
-					StaticVertices[VerticesOffset + VertexIndex].TangentZ = Surface.Normals[VertexIndex];
-					FMemory::Memcpy(
-						StaticVertices[VerticesOffset + VertexIndex].UVs,
-						Surface.Uvs[VertexIndex].GetData(),
-						sizeof(FVector2D) * UVCount);
-
-					VertexSurfaceIndex[VerticesOffset + VertexIndex] = I;
-				}
-
-				FMemory::Memcpy(
-					Vertices.GetData() + VerticesOffset,
-					Surface.Vertices.GetData(),
-					sizeof(FVector) * Surface.Vertices.Num());
-
-				// Convert the Indices to Global.
-				for (int32 x = 0; x < Surface.Indices.Num(); x++)
-				{
-					Indices[IndicesOffset + x] = Surface.Indices[x] + VerticesOffset;
-				}
-
-				SurfaceVertexOffsets[I] = VerticesOffset;
-				VerticesOffset += Surface.Vertices.Num();
-
-				SurfaceIndexOffsets[I] = IndicesOffset;
-				IndicesOffset += Surface.Indices.Num();
-			}
-		}
-
-	#if WITH_EDITORONLY_DATA
-		// Initialize the `ImportModel` this is used by the editor during reload time.
-		ImportedModelData.Points = Vertices;
-
-		// Existing points map 1:1
-		ImportedModelData.PointToRawMap.AddUninitialized(ImportedModelData.Points.Num());
-		for (int32 i = 0; i < ImportedModelData.Points.Num(); i++)
-		{
-			ImportedModelData.PointToRawMap[i] = i;
-		}
-		check(ImportedModelData.PointToRawMap.Num() == Vertices.Num());
-
-		for (int32 I = 0; I < Surfaces.Num(); I++)
-		{
-			SkeletalMeshImportData::FMaterial& Mat = ImportedModelData.Materials.AddDefaulted_GetRef();
-			Mat.Material = SurfacesMaterial[I];
-			Mat.MaterialImportName = SurfacesMaterial[I]->GetFullName();
-		}
-
-		ImportedModelData.Faces.SetNum(Indices.Num() / 3);
-		for (int32 FaceIndex = 0; FaceIndex < ImportedModelData.Faces.Num(); FaceIndex += 1)
-		{
-			SkeletalMeshImportData::FTriangle& Triangle = ImportedModelData.Faces[FaceIndex];
-
-			const int32 VertexIndex0 = Indices[FaceIndex * 3 + 0];
-			const int32 VertexIndex1 = Indices[FaceIndex * 3 + 1];
-			const int32 VertexIndex2 = Indices[FaceIndex * 3 + 2];
-			Triangle.WedgeIndex[0] = FaceIndex * 3 + 0;
-			Triangle.WedgeIndex[1] = FaceIndex * 3 + 1;
-			Triangle.WedgeIndex[2] = FaceIndex * 3 + 2;
-
-			Triangle.TangentX[0] = StaticVertices[VertexIndex0].TangentX;
-			Triangle.TangentY[0] = StaticVertices[VertexIndex0].TangentY;
-			Triangle.TangentZ[0] = StaticVertices[VertexIndex0].TangentZ;
-
-			Triangle.TangentX[1] = StaticVertices[VertexIndex1].TangentX;
-			Triangle.TangentY[1] = StaticVertices[VertexIndex1].TangentY;
-			Triangle.TangentZ[1] = StaticVertices[VertexIndex1].TangentZ;
-
-			Triangle.TangentX[2] = StaticVertices[VertexIndex2].TangentX;
-			Triangle.TangentY[2] = StaticVertices[VertexIndex2].TangentY;
-			Triangle.TangentZ[2] = StaticVertices[VertexIndex2].TangentZ;
-
-			Triangle.MatIndex = VertexSurfaceIndex[VertexIndex0];
-			Triangle.AuxMatIndex = 0;
-			Triangle.SmoothingGroups = 1; // TODO Calculate the smoothing group correctly, otherwise everything will be smooth
-		}
-
-		ImportedModelData.Wedges.SetNum(ImportedModelData.Faces.Num() * 3);
-		for (int32 FaceIndex = 0; FaceIndex < ImportedModelData.Faces.Num(); FaceIndex += 1)
-		{
-			for (int32 i = 0; i < 3; i += 1)
-			{
-				const int32 WedgeIndex = FaceIndex * 3 + i;
-				const int32 VertexIndex = Indices[WedgeIndex];
-
-				ImportedModelData.Wedges[WedgeIndex].VertexIndex = VertexIndex;
-				for (int32 UVIndex = 0; UVIndex < FMath::Min(MAX_TEXCOORDS, MAX_STATIC_TEXCOORDS); UVIndex += 1)
-				{
-					ImportedModelData.Wedges[WedgeIndex].UVs[UVIndex] = StaticVertices[VertexIndex].UVs[UVIndex];
-				}
-				ImportedModelData.Wedges[WedgeIndex].MatIndex = VertexSurfaceIndex[VertexIndex];
-				ImportedModelData.Wedges[WedgeIndex].Color = StaticVertices[VertexIndex].Color;
-				ImportedModelData.Wedges[WedgeIndex].Reserved = 0;
-			}
-		}
-
-		{
-			const int32 BoneNum = SkeletalMesh->Skeleton->GetReferenceSkeleton().GetNum();
-			SkeletalMeshImportData::FBone DefaultBone;
-			DefaultBone.Name = FString(TEXT(""));
-			DefaultBone.Flags = 0;
-			DefaultBone.NumChildren = 0;
-			DefaultBone.ParentIndex = INDEX_NONE;
-			DefaultBone.BonePos.Transform.SetIdentity();
-			DefaultBone.BonePos.Length = 0.0;
-			DefaultBone.BonePos.XSize = 1.0;
-			DefaultBone.BonePos.YSize = 1.0;
-			DefaultBone.BonePos.ZSize = 1.0;
-			ImportedModelData.RefBonesBinary.Init(DefaultBone, BoneNum);
-			for (int32 i = 0; i < BoneNum; i += 1)
-			{
-				ImportedModelData.RefBonesBinary[i].Name = SkeletalMesh->Skeleton->GetReferenceSkeleton().GetBoneName(i).ToString();
-				ImportedModelData.RefBonesBinary[i].ParentIndex = SkeletalMesh->Skeleton->GetReferenceSkeleton().GetParentIndex(i);
-				if (ImportedModelData.RefBonesBinary[i].ParentIndex != INDEX_NONE)
-				{
-					// Increase parent children count by 1
-					ImportedModelData.RefBonesBinary[ImportedModelData.RefBonesBinary[i].ParentIndex].NumChildren += 1;
-				}
-			}
-
-			// At this point it's sure all the bones are initialized, finish the process
-			// by setting the local transform.
-			for (int32 i = 0; i < BoneNum; i += 1)
-			{
-				// Relative to its parent.
-				ImportedModelData.RefBonesBinary[i].BonePos.Transform = SkeletalMesh->Skeleton->GetReferenceSkeleton().GetRawRefBonePose()[i];
-				// Set the Bone Length.
-				ImportedModelData.RefBonesBinary[i].BonePos.Length = ImportedModelData.RefBonesBinary[i].BonePos.Transform.GetLocation().Size();
-			}
-		}
-	#endif
-
-		// Unreal doesn't support more than `MAX_TOTAL_INFLUENCES` BoneInfluences.
-		check(MaxBoneInfluences <= MAX_TOTAL_INFLUENCES);
-
-		// Unreal doesn't support more than `MAX_STATIC_TEXCOORDS`.
-		check(UVCount <= MAX_STATIC_TEXCOORDS);
-
-		// Populate Arrays step.
-		SkeletalMesh->AllocateResourceForRendering();
-		FSkeletalMeshRenderData* MeshRenderData = SkeletalMesh->GetResourceForRendering();
-
-		FSkeletalMeshLODRenderData* LODMeshRenderData = new FSkeletalMeshLODRenderData;
-		MeshRenderData->LODRenderData.Add(LODMeshRenderData);
-
-		SkeletalMesh->ResetLODInfo();
-		FSkeletalMeshLODInfo& MeshLodInfo = SkeletalMesh->AddLODInfo();
-		// These are correct unreal defaults.
-		MeshLodInfo.LODHysteresis = 0.02;
-		MeshLodInfo.ScreenSize = 1.0;
-
-		// Set Bounding boxes
-		const FBox BoundingBox(Vertices.GetData(), Vertices.Num());
-		SkeletalMesh->SetImportedBounds(FBoxSphereBounds(BoundingBox));
-
-	#if WITH_EDITORONLY_DATA
-		FSkeletalMeshLODModel* SkeletalMeshLODModel = new FSkeletalMeshLODModel();
-		SkeletalMesh->GetImportedModel()->LODModels.Add(SkeletalMeshLODModel);
-
-		SkeletalMeshLODModel->NumVertices = Vertices.Num();
-		SkeletalMeshLODModel->NumTexCoords = UVCount;
-
-		SkeletalMeshLODModel->Sections.SetNum(Surfaces.Num());
-		SkeletalMeshLODModel->MaxImportVertex = Vertices.Num() - 1;
-
-		ImportedModelData.NumTexCoords = UVCount;
-		ImportedModelData.MaxMaterialIndex = Surfaces.Num() - 1;
-		ImportedModelData.bHasVertexColors = Surfaces[0].Colors.Num() > 0;;
-		ImportedModelData.bHasNormals = true;
-		ImportedModelData.bHasTangents = true;
-		ImportedModelData.bUseT0AsRefPose = false;
-		ImportedModelData.bDiffPose = false;
-	#endif
-
-		LODMeshRenderData->RenderSections.SetNum(Surfaces.Num());
-
-		for (int32 I = 0; I < Surfaces.Num(); I++)
-		{
-			const FMeshSurface& Surface = Surfaces[I];
-			FSkelMeshRenderSection& RenderSection = LODMeshRenderData->RenderSections[I];
-
-			RenderSection.bDisabled = false;
-			RenderSection.BaseVertexIndex = SurfaceVertexOffsets[I];
-			RenderSection.NumVertices = Surface.Vertices.Num();
-			RenderSection.BaseIndex = SurfaceIndexOffsets[I];
-			RenderSection.NumTriangles = Surface.Indices.Num() / 3;
-			RenderSection.MaterialIndex = I;
-			RenderSection.bCastShadow = true;
-			RenderSection.bRecomputeTangent = false;
-			RenderSection.MaxBoneInfluences = MaxBoneInfluences;
-
-	#if WITH_EDITOR
-			FSkelMeshSection& MeshSection = SkeletalMeshLODModel->Sections[I];
-			MeshSection.bDisabled = RenderSection.bDisabled;
-			MeshSection.bRecomputeTangent = RenderSection.bRecomputeTangent;
-			MeshSection.bCastShadow = RenderSection.bCastShadow;
-			MeshSection.BaseVertexIndex = RenderSection.BaseVertexIndex;
-			MeshSection.BaseIndex = RenderSection.BaseIndex;
-			MeshSection.MaterialIndex = RenderSection.MaterialIndex;
-			MeshSection.NumVertices = RenderSection.NumVertices;
-			MeshSection.NumTriangles = RenderSection.NumTriangles;
-			MeshSection.MaxBoneInfluences = RenderSection.MaxBoneInfluences;
-			MeshSection.bUse16BitBoneIndex = bUse16BitBoneIndex;
-			MeshSection.OriginalDataSectionIndex = I; // Section IDX for below lookup in user sections data
-
-			MeshSection.SoftVertices.SetNum(Surface.Vertices.Num());
-			for (int32 v = 0; v < Surface.Vertices.Num(); v += 1)
-			{
-				MeshSection.SoftVertices[v].Position = Surface.Vertices[v];
-				MeshSection.SoftVertices[v].TangentX = Surface.Tangents[v];
-				MeshSection.SoftVertices[v].TangentY = FVector::CrossProduct(Surface.Normals[v], Surface.Tangents[v]) * (Surface.FlipBinormalSigns[v] ? -1.0 : 1.0);
-				MeshSection.SoftVertices[v].TangentZ = Surface.Normals[v];
-				FMemory::Memcpy(
-					MeshSection.SoftVertices[v].UVs,
-					Surface.Uvs[v].GetData(),
-					sizeof(FVector2D) * UVCount);
-				if (Surface.Colors.Num() > v)
-				{
-					MeshSection.SoftVertices[v].Color = Surface.Colors[v];
-				}
-
-				for (int InfluenceIndex = 0; InfluenceIndex < MAX_TOTAL_INFLUENCES; InfluenceIndex += 1)
-				{
-					const TArray<FRawBoneInfluence>& VertInfluences = Surface.BoneInfluences[v];
-					const int32 VertexIndex = SurfaceVertexOffsets[I] + v;
-					if (VertInfluences.Num() <= InfluenceIndex)
-					{
-						MeshSection.SoftVertices[v].InfluenceWeights[InfluenceIndex] = 0;
-						MeshSection.SoftVertices[v].InfluenceBones[InfluenceIndex] = INDEX_NONE;
-					}
-					else
-					{
-						const FRawBoneInfluence& VertInfluence = VertInfluences[InfluenceIndex];
-						// Make sure these are the same.
-						check(v == VertInfluence.VertexIndex);
-
-						// Convert 0.0 - 1.0 range to 0 - 255
-						const uint8 EncodedWeight =
-							FMath::Clamp(VertInfluence.Weight, 0.f, 1.f) * 255.f;
-						MeshSection.SoftVertices[v].InfluenceWeights[InfluenceIndex] = EncodedWeight;
-						MeshSection.SoftVertices[v].InfluenceBones[InfluenceIndex] = EncodedWeight == 0 ? INDEX_NONE : VertInfluence.BoneIndex;
-					}
-				}
-			}
-
-			{
-				// In Editor we want to make sure the data is in sync between
-				// `UserSectionsData` and RenderSections.
-				FSkelMeshSourceSectionUserData& UserSectionData = SkeletalMeshLODModel->UserSectionsData.FindOrAdd(I);
-				UserSectionData.bDisabled = MeshSection.bDisabled;
-				UserSectionData.bCastShadow = MeshSection.bCastShadow;
-				UserSectionData.bRecomputeTangent = MeshSection.bRecomputeTangent;
-				UserSectionData.RecomputeTangentsVertexMaskChannel = MeshSection.RecomputeTangentsVertexMaskChannel;
-				UserSectionData.GenerateUpToLodIndex = MeshSection.GenerateUpToLodIndex;
-
-				const bool IsRenderDataInSync =
-					UserSectionData.bDisabled == RenderSection.bDisabled &&
-					UserSectionData.bCastShadow == RenderSection.bCastShadow &&
-					UserSectionData.bRecomputeTangent == RenderSection.bRecomputeTangent &&
-					UserSectionData.RecomputeTangentsVertexMaskChannel == RenderSection.RecomputeTangentsVertexMaskChannel &&
-					UserSectionData.CorrespondClothAssetIndex == RenderSection.CorrespondClothAssetIndex &&
-					UserSectionData.ClothingData.AssetGuid == RenderSection.ClothingData.AssetGuid &&
-					UserSectionData.ClothingData.AssetLodIndex == RenderSection.ClothingData.AssetLodIndex;
-
-				check(IsRenderDataInSync); // this must always be true or unreal will choke.
-			}
-	#endif
-
-			// This is used when you have no overlapping Vertices.
-			{
-				RenderSection.DuplicatedVerticesBuffer.DupVertData.ResizeBuffer(1);
-				uint8* VertData = RenderSection.DuplicatedVerticesBuffer.DupVertData.GetDataPointer();
-				FMemory::Memzero(VertData, sizeof(uint32) * RenderSection.DuplicatedVerticesBuffer.DupVertData.Num());
-
-				RenderSection.DuplicatedVerticesBuffer.DupVertIndexData.ResizeBuffer(RenderSection.NumVertices);
-				uint8* IndexData = RenderSection.DuplicatedVerticesBuffer.DupVertIndexData.GetDataPointer();
-				FMemory::Memzero(IndexData, RenderSection.NumVertices * sizeof(FIndexLengthPair));
-			}
-		}
-
-		// Set the Indices.
-		{
-	#if WITH_EDITOR
-			SkeletalMeshLODModel->IndexBuffer = Indices;
-	#endif
-
-			LODMeshRenderData->MultiSizeIndexContainer.RebuildIndexBuffer(
-				// Dynamically chose the index buffer size.
-				Indices.Num() < MAX_uint16 ? sizeof(uint16) : sizeof(uint32),
-				Indices);
-
-			// Test our data is good and the renderer can access it.
-			TArray<uint32> ActualIndexBuffer;
-			LODMeshRenderData->MultiSizeIndexContainer.GetIndexBuffer(ActualIndexBuffer);
-			check(ActualIndexBuffer.Num() == Indices.Num());
-		}
-
-		// Set the Vertex now.
-		constexpr bool NeedCPUAccess = false;
-
-		LODMeshRenderData->StaticVertexBuffers.PositionVertexBuffer.Init(
-			StaticVertices,
-			NeedCPUAccess);
-		LODMeshRenderData->StaticVertexBuffers.ColorVertexBuffer.Init(
-			StaticVertices,
-			NeedCPUAccess);
-		LODMeshRenderData->StaticVertexBuffers.StaticMeshVertexBuffer.Init(
-			StaticVertices,
-			UVCount,
-			NeedCPUAccess);
-
-		LODMeshRenderData->SkinWeightVertexBuffer.SetMaxBoneInfluences(MaxBoneInfluences);
-		LODMeshRenderData->SkinWeightVertexBuffer.SetUse16BitBoneIndex(bUse16BitBoneIndex);
-
-		TArray<FSkinWeightInfo> Weights;
-		Weights.SetNum(Vertices.Num());
-
-		for (int WeightIdx = 0; WeightIdx < Weights.Num(); WeightIdx++)
-		{
-			for (int InfluenceIdx= 0; InfluenceIdx< MAX_TOTAL_INFLUENCES; ++InfluenceIdx)
-			{
-				Weights[WeightIdx].InfluenceBones[InfluenceIdx] = INDEX_NONE;
-				Weights[WeightIdx].InfluenceWeights[InfluenceIdx] = 0;
-			}
-		}
-
-		for (int32 I = 0; I < Surfaces.Num(); I++)
-		{
-			const FMeshSurface& Surface = Surfaces[I];
-
-			for (int32 LocalVertexIndex = 0; LocalVertexIndex < Surface.BoneInfluences.Num(); LocalVertexIndex += 1)
-			{
-				const TArray<FRawBoneInfluence>& VertInfluences = Surface.BoneInfluences[LocalVertexIndex];
-				const int32 VertexIndex = SurfaceVertexOffsets[I] + LocalVertexIndex;
-				FSkinWeightInfo& Weight = Weights[VertexIndex];
-
-				for (int InfluenceIndex = 0; InfluenceIndex < MaxBoneInfluences; InfluenceIndex++)
-				{
-					if (InfluenceIndex >= VertInfluences.Num())
-					{
-						// The available influences for this surface, is smaller than the whole
-						// Mesh. This happens when the user submits surfaces with different
-						// bone weights. Pad it automatically, to simplify the user life.
-						Weight.InfluenceWeights[InfluenceIndex] = 0;
-						Weight.InfluenceBones[InfluenceIndex] = INDEX_NONE;
-					}
-					else
-					{
-						const FRawBoneInfluence& VertInfluence = VertInfluences[InfluenceIndex];
-						// Make sure these are the same.
-						check(LocalVertexIndex == VertInfluence.VertexIndex);
-
-						if (!SkeletalMesh->Skeleton->GetReferenceSkeleton().IsValidIndex(VertInfluence.BoneIndex))
-						{
-							// This bone appear to be invalid, continue.
-							UE_LOG(LogTemp, Warning, TEXT("The bone %i isn't found in this skeleton"), VertInfluence.BoneIndex);
-							continue;
-						}
-
-						// Convert 0.0 - 1.0 range to 0 - 255
-						const uint8 EncodedWeight =
-							FMath::Clamp(VertInfluence.Weight, 0.f, 1.f) * 255.f;
-						Weight.InfluenceWeights[InfluenceIndex] = EncodedWeight;
-						Weight.InfluenceBones[InfluenceIndex] = EncodedWeight == 0 ? INDEX_NONE : VertInfluence.BoneIndex;
-
-	#if WITH_EDITORONLY_DATA
-						if (Weight.InfluenceBones[InfluenceIndex] != INDEX_NONE)
-						{
-							SkeletalMeshImportData::FRawBoneInfluence& Influence = ImportedModelData.Influences.AddDefaulted_GetRef();
-							Influence.Weight = FMath::Clamp(static_cast<float>(Weight.InfluenceWeights[InfluenceIndex]) / 255.0, 0.0, 1.0);
-							Influence.BoneIndex = Weight.InfluenceBones[InfluenceIndex];
-							Influence.VertexIndex = VertexIndex;
-						}
-	#endif
-					}
-				}
-			}
-		}
-
-		// Enables all the Bones of this skeleton, to avoid break the mesh.
-	#if WITH_EDITOR
-		SkeletalMeshLODModel->ActiveBoneIndices.Empty();
-		SkeletalMeshLODModel->RequiredBones.Empty();
-	#endif
-		LODMeshRenderData->RequiredBones.Empty();
-		LODMeshRenderData->ActiveBoneIndices.Empty();
-
-		for (int32 I = 0; I < Surfaces.Num(); I++)
-		{
-			FSkelMeshRenderSection& RenderSection = LODMeshRenderData->RenderSections[I];
-			RenderSection.BoneMap.Empty();
-	#if WITH_EDITOR
-			FSkelMeshSection& MeshSection = SkeletalMeshLODModel->Sections[I];
-			MeshSection.BoneMap.Empty();
-	#endif
-		}
-
-		const int32 BoneNum = SkeletalMesh->Skeleton->GetReferenceSkeleton().GetNum();
-		for (int32 BoneIndex = 0; BoneIndex < BoneNum; BoneIndex++)
-		{
-	#if WITH_EDITOR
-			SkeletalMeshLODModel->ActiveBoneIndices.AddUnique(BoneIndex);
-			SkeletalMeshLODModel->RequiredBones.AddUnique(BoneIndex);
-	#endif
-			LODMeshRenderData->RequiredBones.AddUnique(BoneIndex);
-			LODMeshRenderData->ActiveBoneIndices.AddUnique(BoneIndex);
-
-			for (int32 I = 0; I < Surfaces.Num(); I++)
-			{
-				FSkelMeshRenderSection& RenderSection = LODMeshRenderData->RenderSections[I];
-				RenderSection.BoneMap.AddUnique(BoneIndex);
-	#if WITH_EDITOR
-				FSkelMeshSection& MeshSection = SkeletalMeshLODModel->Sections[I];
-				MeshSection.BoneMap.AddUnique(BoneIndex);
-	#endif
-			}
-		}
-
-		// Set the skin weights.
-		LODMeshRenderData->SkinWeightVertexBuffer = Weights;
-
-		// Set the default Material.
-		for (auto Material : SurfacesMaterial)
-		{
-			SkeletalMesh->Materials.Add(Material);
-		}
-
-		// Rebuild inverse ref pose matrices.
-		SkeletalMesh->SkelMirrorTable.Empty();
-		SkeletalMesh->SkelMirrorAxis = EAxis::Type::None;
-		SkeletalMesh->SkelMirrorFlipAxis = EAxis::Type::None;
-		SkeletalMesh->RefBasesInvMatrix.Empty();
-		SkeletalMesh->CalculateInvRefMatrices();
-		MeshRenderData->bReadyForStreaming = false;
-
-		// Suspected Finalization step
-		if (!GIsEditor)
-		{
-			SkeletalMesh->NeverStream = false;
-		}
-
-	#if WITH_EDITOR
-		if (SkeletalMesh->LODSettings != nullptr)
-		{
-			// update mapping information on the class
-			SkeletalMesh->LODSettings->SetLODSettingsFromMesh(SkeletalMesh);
-
-			checkf(SkeletalMesh->LODSettings != nullptr, TEXT("At this point the LODSetings are supposed to be set."));
-
-			const int32 NumSettings = FMath::Min(SkeletalMesh->LODSettings->GetNumberOfSettings(), SkeletalMesh->GetLODNum());
-			checkf(LODIndex < NumSettings, TEXT("Make sure the LODSettings are set for the LODIndex 0."));
-
-			const FSkeletalMeshLODGroupSettings* SkeletalMeshLODGroupSettings = &SkeletalMesh->LODSettings->GetSettingsForLODLevel(LODIndex);
-			MeshLodInfo.BuildGUID = MeshLodInfo.ComputeDeriveDataCacheKey(SkeletalMeshLODGroupSettings);
-		}
-
-		const FString BuildStringID = SkeletalMesh->GetImportedModel()->LODModels[0].GetLODModelDeriveDataKey();
-		SkeletalMesh->GetImportedModel()->LODModels[0].BuildStringID = BuildStringID;
-
-		SkeletalMesh->SetLODImportedDataVersions(0, ESkeletalMeshGeoImportVersions::LatestVersion, ESkeletalMeshSkinningImportVersions::LatestVersion);
-		SkeletalMesh->SaveLODImportedData(0, ImportedModelData);
-		SkeletalMesh->InvalidateDeriveDataCacheGUID();
-	#endif
-
-		// Calls InitResources.
-		SkeletalMesh->PostLoad();
-
-	#if WITH_EDITOR
-		// Signals to editor we are done with our changes
-		// This is to prevent the editor variable changes overwriting the import mesh,
-		// if you don't set this random crashes occur.
-		SkeletalMesh->StackPostEditChange();
-	#endif
-	}
-
-	static bool DecomposeSkeletalMesh(
-		/// The `SkeletalMesh` to decompose
-		const USkeletalMesh* SkeletalMesh,
-		/// Out Surfaces.
-		TArray<FMeshSurface>& OutSurfaces,
-		/// The vertex offsets for each surface, relative to the passed `SkeletalMesh`
-		TArray<int32>& OutSurfacesVertexOffsets,
-		/// The index offsets for each surface, relative to the passed `SkeletalMesh`
-		TArray<int32>& OutSurfacesIndexOffsets,
-		/// Out Materials used.
-		TArray<UMaterialInterface*>& OutSurfacesMaterial)
-	{
-		OutSurfaces.Empty();
-		OutSurfacesVertexOffsets.Empty();
-		OutSurfacesIndexOffsets.Empty();
-		OutSurfacesMaterial.Empty();
-
-		// Assume only the LOD 0 exist.
-		constexpr int32 LODIndex = 0;
-
-		// Extract the Surfaces from the `SourceMesh`
-		const int32 RenderSectionsNum = SkeletalMesh->GetResourceForRendering()->LODRenderData[LODIndex].RenderSections.Num();;
-
-		OutSurfaces.SetNum(RenderSectionsNum);
-		OutSurfacesVertexOffsets.SetNum(RenderSectionsNum);
-		OutSurfacesIndexOffsets.SetNum(RenderSectionsNum);
-
-		const FSkeletalMeshLODRenderData& RenderData = SkeletalMesh->GetResourceForRendering()->LODRenderData[LODIndex];
-
-		TArray<uint32> IndexBuffer;
-		RenderData.MultiSizeIndexContainer.GetIndexBuffer(IndexBuffer);
-
-		for (int32 SectionIndex = 0; SectionIndex < RenderSectionsNum; SectionIndex += 1)
-		{
-			FMeshSurface& Surface = OutSurfaces[SectionIndex];
-
-			const FSkelMeshRenderSection& RenderSection = RenderData.RenderSections[SectionIndex];
-
-			const uint32 VertexIndexOffset = RenderSection.BaseVertexIndex;
-			const uint32 VertexNum = RenderSection.NumVertices;
-
-			OutSurfacesVertexOffsets[SectionIndex] = VertexIndexOffset;
-
-			Surface.Vertices.SetNum(VertexNum);
-			Surface.Normals.SetNum(VertexNum);
-			Surface.Tangents.SetNum(VertexNum);
-			Surface.FlipBinormalSigns.SetNum(VertexNum);
-			Surface.Uvs.SetNum(VertexNum);
-			Surface.Colors.SetNum(VertexNum);
-			Surface.BoneInfluences.SetNum(VertexNum);
-
-			for (uint32 i = 0; i < VertexNum; i += 1)
-			{
-				const uint32 VertexIndex = VertexIndexOffset + i;
-
-				Surface.Vertices[i] = RenderData.StaticVertexBuffers.PositionVertexBuffer.VertexPosition(VertexIndex);
-
-				Surface.Normals[i] = RenderData.StaticVertexBuffers.StaticMeshVertexBuffer.VertexTangentZ(VertexIndex);
-				Surface.Tangents[i] = RenderData.StaticVertexBuffers.StaticMeshVertexBuffer.VertexTangentX(VertexIndex);
-				// Check if the Binormal Sign is flipped.
-				const FVector& ActualBinormal = RenderData.StaticVertexBuffers.StaticMeshVertexBuffer.VertexTangentY(VertexIndex);
-				const FVector CalculatedBinormal = FVector::CrossProduct(Surface.Normals[i], Surface.Tangents[i]);
-				// If the Binormal points toward different location, the `FlipBinormalSign`
-				// must be `false`. Check how the `VertexTangentY` is computed above.
-				Surface.FlipBinormalSigns[i] = FVector::DotProduct(ActualBinormal, CalculatedBinormal) < 0.99;
-
-				Surface.Uvs[i].SetNum(RenderData.StaticVertexBuffers.StaticMeshVertexBuffer.GetNumTexCoords());
-				for (uint32 UVIndex = 0; UVIndex < RenderData.StaticVertexBuffers.StaticMeshVertexBuffer.GetNumTexCoords(); UVIndex += 1)
-				{
-					Surface.Uvs[i][UVIndex] = RenderData.StaticVertexBuffers.StaticMeshVertexBuffer.GetVertexUV(VertexIndex, UVIndex);
-				}
-
-				if (VertexIndex < RenderData.StaticVertexBuffers.ColorVertexBuffer.GetNumVertices())
-				{
-					// Make sure the color is set. Not all meshes have vertex colors.
-					Surface.Colors[i] = RenderData.StaticVertexBuffers.ColorVertexBuffer.VertexColor(VertexIndex);
-				}
-
-				checkf(int32(RenderData.SkinWeightVertexBuffer.GetMaxBoneInfluences()) >= RenderSection.MaxBoneInfluences, TEXT("These two MUST be the same."));
-
-				Surface.BoneInfluences[i].SetNum(RenderSection.MaxBoneInfluences);
-				for (
-					int32 BoneInfluenceIndex = 0;
-					BoneInfluenceIndex < RenderSection.MaxBoneInfluences;
-					BoneInfluenceIndex += 1)
-				{
-					Surface.BoneInfluences[i][BoneInfluenceIndex].VertexIndex = i;
-					Surface.BoneInfluences[i][BoneInfluenceIndex].BoneIndex =
-						RenderData.SkinWeightVertexBuffer.GetBoneIndex(VertexIndex, BoneInfluenceIndex);
-					Surface.BoneInfluences[i][BoneInfluenceIndex].Weight =
-						FMath::Clamp(static_cast<float>(RenderData.SkinWeightVertexBuffer.GetBoneWeight(VertexIndex, BoneInfluenceIndex)) / 255.0, 0.0, 1.0);
-				}
-			}
-
-			const uint32 IndexIndexOffset = RenderSection.BaseIndex;
-			const uint32 IndexCount = RenderSection.NumTriangles * 3;
-
-			OutSurfacesIndexOffsets[SectionIndex] = IndexIndexOffset;
-			Surface.Indices.SetNum(IndexCount);
-
-			for (uint32 i = 0; i < IndexCount; i += 1)
-			{
-				const uint32 Index = i + IndexIndexOffset;
-				// Note: Subtracting the `VertexIndexOffset` to obtain the index relative
-				// on the surface.
-				Surface.Indices[i] = IndexBuffer[Index] - VertexIndexOffset;
-			}
-		}
-
-		OutSurfacesMaterial.Reserve(SkeletalMesh->Materials.Num());
-		for (const FSkeletalMaterial& Material : SkeletalMesh->Materials)
-		{
-			OutSurfacesMaterial.Add(Material.MaterialInterface);
-		}
-
-		return true;
 	}
 };

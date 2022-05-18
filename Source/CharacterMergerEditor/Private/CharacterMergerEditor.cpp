@@ -4,6 +4,8 @@
 
 #include "CharacterMergerCommands.h"
 #include "CharacterMergerLibrary.h"
+#include "ContentBrowserModule.h"
+#include "IContentBrowserSingleton.h"
 #include "LevelEditor.h"
 #include "Viewport/SCharacterMergerViewport.h"
 #include "Widgets/Docking/SDockTab.h"
@@ -48,6 +50,17 @@ void FCharacterMergerEditorModule::ShutdownModule()
 void FCharacterMergerEditorModule::PluginButtonClicked()
 {
 	FGlobalTabmanager::Get()->TryInvokeTab(CharacterMergerTabName);
+}
+
+FReply FCharacterMergerEditorModule::CompareRig()
+{
+	FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
+	TArray<FAssetData> SelectedAssets;
+	ContentBrowserModule.Get().GetSelectedAssets(SelectedAssets);
+	auto Source = Cast<USkeletalMesh>(SelectedAssets[0].GetAsset());
+	auto Target = Cast<USkeletalMesh>(SelectedAssets[1].GetAsset());
+	FCharacterMergerLibrary::CompareMeshRigging(Source, Target);
+	return FReply::Handled();
 }
 
 FReply FCharacterMergerEditorModule::OnMergeRequested()
@@ -169,11 +182,25 @@ TSharedRef<SDockTab> FCharacterMergerEditorModule::SpawnTab_Toolbar(const FSpawn
 	return SNew(SDockTab)
 		.Label(LOCTEXT("ToolbarTab_Title", "Toolbar"))
 		[
-			SNew(SButton)
-			.HAlign(HAlign_Center)
-			.VAlign(VAlign_Center)
-			.Text(FText::FromString("Merge"))
-			.OnClicked_Raw(this, &FCharacterMergerEditorModule::OnMergeRequested)
+			SNew(SHorizontalBox)
+
+			+SHorizontalBox::Slot()
+			[
+				SNew(SButton)
+				.HAlign(HAlign_Center)
+				.VAlign(VAlign_Center)
+				.Text(FText::FromString("Merge"))
+				.OnClicked_Raw(this, &FCharacterMergerEditorModule::OnMergeRequested)
+			]
+
+			+SHorizontalBox::Slot()
+			[
+				SNew(SButton)
+				.HAlign(HAlign_Center)
+				.VAlign(VAlign_Center)
+				.Text(FText::FromString("Compare two selected SK meshes' skinning"))
+				.OnClicked_Raw(this, &FCharacterMergerEditorModule::CompareRig)
+			]
 		];
 }
 

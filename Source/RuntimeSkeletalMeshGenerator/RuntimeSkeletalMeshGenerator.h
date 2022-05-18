@@ -58,31 +58,11 @@ public: // ----------------------------------------------------------------- API
 	 */
 	static void GenerateSkeletalMesh(
 		USkeletalMesh* SkeletalMesh,
-		const TArray<FMeshSurface>& Surfaces,
+		USkeletalMesh* SourceMesh,
+		TArray<FMeshSurface>& Surfaces,
 		const TArray<UMaterialInterface*>& SurfacesMaterial,
+		const TArray<int32>& RemapingBones,
 		const TMap<FName, FTransform>& BoneTransformsOverride = TMap<FName, FTransform>());
-
-	/**
-	 * Generate the `SkeletalMeshComponent` for the given surfaces, and add the
-	 * component to the `Actor`.
-	 */
-	static USkeletalMeshComponent* GenerateSkeletalMeshComponent(
-		AActor* Actor,
-		USkeleton* BaseSkeleton,
-		const TArray<FMeshSurface>& Surfaces,
-		const TArray<UMaterialInterface*>& SurfacesMaterial,
-		const TMap<FName, FTransform>& BoneTransformsOverride = TMap<FName, FTransform>());
-
-	/**
-	 * Update an existing the `SkeletalMeshComponent` for the given surfaces
-	 * optionally supply the transform override
-	 */
-	static void UpdateSkeletalMeshComponent(
-		USkeletalMeshComponent* SkeletalMeshComponent,
-		USkeleton* BaseSkeleton,
-		const TArray<FMeshSurface>& Surfaces,
-		const TArray<UMaterialInterface*>& SurfacesMaterial,
-		const TMap<FName, FTransform>& BoneTransformOverrides = TMap<FName, FTransform>());
 
 	/**
 	 * Decompose the `USkeletalMesh` in `Surfaces`.
