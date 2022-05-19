@@ -20,13 +20,21 @@ USkeletalMesh* FCharacterMergerLibrary::MergeRequest(const TArray<USkeletalMesh*
 	
 	for(int32 It = 0; It < ComponentsToWeld.Num(); It++)
 	{
-		ParseMorphs(ComponentsToWeld[It], CompositeMesh);
+		ParseMorphs(ComponentsToWeld[It], CompositeMesh, It);
 	}
 	return CompositeMesh;
 }
 
 void FCharacterMergerLibrary::ParseMorphs(USkeletalMesh* Source, USkeletalMesh* Target, int32 SourceInTargetSection)
 {
+	FSkeletalMeshLODRenderData& RenderData = Target->GetResourceForRendering()->LODRenderData[0];
+
+	int32 PrevSectionsVertices = 0;
+	for(int It = 0; It < SourceInTargetSection; It++)
+	{
+		PrevSectionsVertices += RenderData.RenderSections[It].GetNumVertices();
+	}
+	
 	/**Collect morph targets data from source*/
 	TMap<FName, TArray<FMorphTargetDelta>> SourceMorphTargets;
 	for(const UMorphTarget* SourceMT : Source->GetMorphTargets())
@@ -34,15 +42,15 @@ void FCharacterMergerLibrary::ParseMorphs(USkeletalMesh* Source, USkeletalMesh* 
 		FName SourceMTName = SourceMT->GetFName();
 		SourceMorphTargets.Add(SourceMTName);
 		
-		for(const FMorphTargetDelta& TargetDelta : SourceMT->MorphLODModels[0].Vertices)
+		for(FMorphTargetDelta TargetDelta : SourceMT->MorphLODModels[0].Vertices)
 		{
+			TargetDelta.SourceIdx += PrevSectionsVertices;
 			SourceMorphTargets[SourceMTName].Add(TargetDelta);
 		}
 	}
 
 	/**Create new morph target objects*/
 	TArray<UMorphTarget*> MorphTargetObjects;
-	FSkeletalMeshLODRenderData& RenderData = Target->GetResourceForRendering()->LODRenderData[0];
 	for(const TTuple<FName, TArray<FMorphTargetDelta>>& MorphTarget : SourceMorphTargets)
 	{
 		TArray<FName> ExistingMorphs;
@@ -54,6 +62,7 @@ void FCharacterMergerLibrary::ParseMorphs(USkeletalMesh* Source, USkeletalMesh* 
 		{
 			NewMorphTarget = NewObject<UMorphTarget>(Target, MorphTarget.Key);
 			NewMorphTarget->MorphLODModels.AddDefaulted(1);
+			MorphTargetObjects.Add(NewMorphTarget);
 		}
 		else
 		{
@@ -112,9 +121,8 @@ void FCharacterMergerLibrary::ParseMorphs(USkeletalMesh* Source, USkeletalMesh* 
 
 		// remove array slack
 		MorphModel.Vertices.Shrink();
-
-		MorphTargetObjects.Add(NewMorphTarget);
 	}
+	MorphTargetObjects.Append(Target->GetMorphTargets());
 
 	/**Wait until render thread complete commands*/
 	FlushRenderingCommands();
