@@ -150,12 +150,12 @@ static void GenerateNewSectionArray(USkeletalMesh* SrcMesh, TArray<int32>& Secti
 }
 
 template <typename VertexDataType>
-void CopyVertexFromSource(VertexDataType& DestVert, const FSkeletalMeshLODRenderData& SrcLODData, int32 SourceVertIdx,
+void CopyVertexFromSource(VertexDataType& DestVert, const FSkeletalMeshLODRenderData& SrcLODData, const TArray<FMeshSurface>& Surfaces, int32 SourceVertIdx,
 	const FCMSkeletalMeshMerge::FCMMergeSectionInfo& MergeSectionInfo)
 {
 	/**Find vertex right index */
-	FVector Offset = FVector::ZeroVector;
-	DestVert.Position = SrcLODData.StaticVertexBuffers.PositionVertexBuffer.VertexPosition(SourceVertIdx) + Offset;
+	//DestVert.Position = SrcLODData.StaticVertexBuffers.PositionVertexBuffer.VertexPosition(SourceVertIdx) ;
+	DestVert.Position = Surfaces[0].Vertices[SourceVertIdx];
 	DestVert.TangentX = SrcLODData.StaticVertexBuffers.StaticMeshVertexBuffer.VertexTangentX(SourceVertIdx);
 	DestVert.TangentZ = SrcLODData.StaticVertexBuffers.StaticMeshVertexBuffer.VertexTangentZ(SourceVertIdx);
 
@@ -181,7 +181,7 @@ void CopyVertexFromSource(VertexDataType& DestVert, const FSkeletalMeshLODRender
 }
 
 template <typename VertexDataType>
-static void GenerateLODModel(USkeletalMesh* MergeMesh, USkeletalMesh* SourceMesh, TArray<int32> SectionRemapping, int32 LODIdx)
+static void GenerateLODModel(USkeletalMesh* MergeMesh, USkeletalMesh* SourceMesh, const TArray<FMeshSurface>& Surfaces, TArray<int32> SectionRemapping, int32 LODIdx)
 {
 	// add the new LOD model entry
 	FSkeletalMeshRenderData* MergeResource = MergeMesh->GetResourceForRendering();
@@ -329,7 +329,7 @@ static void GenerateLODModel(USkeletalMesh* MergeMesh, USkeletalMesh* SourceMesh
 				VertexDataType& DestVert = MergedVertexBuffer[MergedVertexBuffer.AddUninitialized()];
 				FSkinWeightInfo& DestWeight = MergedSkinWeightBuffer[MergedSkinWeightBuffer.AddUninitialized()];
 
-				CopyVertexFromSource<VertexDataType>(DestVert, SrcLODData, VertIdx, MergeSectionInfo);
+				CopyVertexFromSource<VertexDataType>(DestVert, SrcLODData, Surfaces, VertIdx, MergeSectionInfo);
 
 				SourceMaxBoneInfluences = FMath::Max(SourceMaxBoneInfluences, MaxBoneInfluences);
 				bSourceUse16BitBoneIndex |= bUse16BitBoneIndex;
@@ -515,7 +515,7 @@ void FRuntimeSkeletalMeshGenerator::GenerateSkeletalMesh(
 
 	InitializeSkeleton(SkeletalMesh, SourceMesh);
 
-	constexpr int32 LODIndex = 0;
+	/*constexpr int32 LODIndex = 0;
 
 #if WITH_EDITORONLY_DATA
 	FSkeletalMeshImportData ImportedModelData;
@@ -732,7 +732,7 @@ void FRuntimeSkeletalMeshGenerator::GenerateSkeletalMesh(
 	if (MeshRenderData)
 	{
 		MeshRenderData->LODRenderData.Empty(1);
-	}
+	}*/
 
 	SkeletalMesh->ResetLODInfo();
 	SkeletalMesh->GetMaterials().Empty();
@@ -799,16 +799,16 @@ void FRuntimeSkeletalMeshGenerator::GenerateSkeletalMesh(
 			switch( PerLODNumUVSets[0])
 			{
 			case 1:
-				GenerateLODModel< TGPUSkinVertexFloat16Uvs<1> >( SkeletalMesh, SourceMesh, RemapingBones, LODIdx );
+				GenerateLODModel< TGPUSkinVertexFloat16Uvs<1> >( SkeletalMesh, SourceMesh, Surfaces, RemapingBones, LODIdx );
 				break;
 			case 2:
-				GenerateLODModel< TGPUSkinVertexFloat16Uvs<2> >( SkeletalMesh, SourceMesh, RemapingBones, LODIdx );
+				GenerateLODModel< TGPUSkinVertexFloat16Uvs<2> >( SkeletalMesh, SourceMesh,  Surfaces, RemapingBones, LODIdx );
 				break;
 			case 3:
-				GenerateLODModel< TGPUSkinVertexFloat16Uvs<3> >( SkeletalMesh, SourceMesh, RemapingBones, LODIdx );
+				GenerateLODModel< TGPUSkinVertexFloat16Uvs<3> >( SkeletalMesh, SourceMesh,  Surfaces, RemapingBones, LODIdx );
 				break;
 			case 4:
-				GenerateLODModel< TGPUSkinVertexFloat16Uvs<4> >( SkeletalMesh, SourceMesh, RemapingBones, LODIdx );
+				GenerateLODModel< TGPUSkinVertexFloat16Uvs<4> >( SkeletalMesh, SourceMesh, Surfaces, RemapingBones, LODIdx );
 				break;
 			default:
 				checkf(false, TEXT("Invalid number of UV sets.  Must be between 0 and 4") );
@@ -820,16 +820,16 @@ void FRuntimeSkeletalMeshGenerator::GenerateSkeletalMesh(
 			switch( PerLODNumUVSets[0])
 			{
 			case 1:
-				GenerateLODModel< TGPUSkinVertexFloat32Uvs<1> >( SkeletalMesh, SourceMesh, RemapingBones, LODIdx );
+				GenerateLODModel< TGPUSkinVertexFloat32Uvs<1> >( SkeletalMesh, SourceMesh, Surfaces, RemapingBones, LODIdx );
 				break;
 			case 2:
-				GenerateLODModel< TGPUSkinVertexFloat32Uvs<2> >( SkeletalMesh, SourceMesh, RemapingBones, LODIdx );
+				GenerateLODModel< TGPUSkinVertexFloat32Uvs<2> >( SkeletalMesh, SourceMesh, Surfaces, RemapingBones, LODIdx );
 				break;
 			case 3:
-				GenerateLODModel< TGPUSkinVertexFloat32Uvs<3> >( SkeletalMesh, SourceMesh, RemapingBones, LODIdx );
+				GenerateLODModel< TGPUSkinVertexFloat32Uvs<3> >( SkeletalMesh, SourceMesh, Surfaces, RemapingBones, LODIdx );
 				break;
 			case 4:
-				GenerateLODModel< TGPUSkinVertexFloat32Uvs<4> >( SkeletalMesh, SourceMesh, RemapingBones, LODIdx );
+				GenerateLODModel< TGPUSkinVertexFloat32Uvs<4> >( SkeletalMesh, SourceMesh, Surfaces, RemapingBones, LODIdx );
 				break;
 			default:
 				checkf(false, TEXT("Invalid number of UV sets.  Must be between 0 and 4") );

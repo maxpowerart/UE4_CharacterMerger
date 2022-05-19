@@ -333,7 +333,7 @@ public:
 			TArray<int32> SurfacesIndexOffsets;
 			TArray<UMaterialInterface*> SurfacesMaterial;
 			FRuntimeSkeletalMeshGenerator::DecomposeSkeletalMesh(MeshToDecompose, Surfaces, SurfacesVertexOffsets, SurfacesIndexOffsets, SurfacesMaterial);
-			//ParseMorphs(MeshToDecompose, Surfaces[0]);
+			ParseMorphs(MeshToDecompose, Surfaces[0]);
 
 			FRuntimeSkeletalMeshGenerator::GenerateSkeletalMesh(RecomposedMesh, MeshToDecompose, Surfaces, SurfacesMaterial);
 			MorphedMeshes.Add(RecomposedMesh);
