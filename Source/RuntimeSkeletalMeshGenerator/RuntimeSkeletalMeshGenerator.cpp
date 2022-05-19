@@ -16,41 +16,16 @@
 #include "Rendering/SkeletalMeshLODModel.h"
 #include "Rendering/SkeletalMeshModel.h"
 
-/** Helper macro to call GenerateLODModel which requires compile time vertex type. */
-#define GENERATE_LOD_MODEL( MergeMesh, SrcMesh, Remapping, VertexType, NumUVs ) \
-{\
-	switch( NumUVs )\
-	{\
-	case 1:\
-		GenerateLODModel< VertexType<1> >( MergeMesh, SrcMesh, Remapping, LODIdx );\
-		break;\
-	case 2:\
-		GenerateLODModel< VertexType<2> >( MergeMesh, SrcMesh, Remapping, LODIdx );\
-		break;\
-	case 3:\
-		GenerateLODModel< VertexType<3> >( MergeMesh, SrcMesh, Remapping, LODIdx );\
-		break;\
-	case 4:\
-		GenerateLODModel< VertexType<4> >( MergeMesh, SrcMesh, Remapping, LODIdx );\
-		break;\
-	default:\
-		checkf(false, TEXT("Invalid number of UV sets.  Must be between 0 and 4") );\
-		break;\
-	}\
-}\
-
 void FRuntimeSkeletalMeshGeneratorModule::StartupModule()
 {
 }
-
 void FRuntimeSkeletalMeshGeneratorModule::ShutdownModule()
 {
 }
 
 IMPLEMENT_MODULE(FRuntimeSkeletalMeshGeneratorModule, RuntimeSkeletalMeshGenerator)
 
-static void MergeBoneMap(TArray<FBoneIndexType>& MergedBoneMap,
-	TArray<FBoneIndexType>& BoneMapToMergedBoneMap, const TArray<FBoneIndexType>& BoneMap)
+static void MergeBoneMap(TArray<FBoneIndexType>& MergedBoneMap, TArray<FBoneIndexType>& BoneMapToMergedBoneMap, const TArray<FBoneIndexType>& BoneMap)
 {
 	BoneMapToMergedBoneMap.AddUninitialized( BoneMap.Num() );
 	for( int32 IdxB=0; IdxB < BoneMap.Num(); IdxB++ )
@@ -58,7 +33,6 @@ static void MergeBoneMap(TArray<FBoneIndexType>& MergedBoneMap,
 		BoneMapToMergedBoneMap[IdxB] = MergedBoneMap.AddUnique( BoneMap[IdxB] );
 	}
 }
-
 static void BoneMapToNewRefSkel(const TArray<FBoneIndexType>& InBoneMap, const TArray<int32>& SrcToDestRefSkeletonMap, TArray<FBoneIndexType>& OutBoneMap)
 {
 	OutBoneMap.Empty();
@@ -70,10 +44,8 @@ static void BoneMapToNewRefSkel(const TArray<FBoneIndexType>& InBoneMap, const T
 		OutBoneMap[i] = SrcToDestRefSkeletonMap[InBoneMap[i]];
 	}
 }
-
-static void GenerateNewSectionArray(USkeletalMesh* SrcMesh,
-	TArray<int32>& SectionRemapingContainer,
-	TArray<FCMSkeletalMeshMerge::FCMNewSectionInfo>& NewSectionArray, int32 LODIdx)
+static void GenerateNewSectionArray(USkeletalMesh* SrcMesh, TArray<int32>& SectionRemapingContainer, TArray<FCMSkeletalMeshMerge::FCMNewSectionInfo>& NewSectionArray,
+	int32 LODIdx)
 {
 	const int32 MaxGPUSkinBones = FGPUBaseSkinVertexFactory::GetMaxGPUSkinBones();
 
@@ -92,9 +64,8 @@ static void GenerateNewSectionArray(USkeletalMesh* SrcMesh,
 				FSkelMeshRenderSection& Section = SrcLODData.RenderSections[SectionIdx];
 
 				// Convert Chunk.BoneMap from src to dest bone indices
-				TArray<FBoneIndexType> DestChunkBoneMap;
+				TArray<FBoneIndexType> DestChunkBoneMap = Section.BoneMap;
 				BoneMapToNewRefSkel(Section.BoneMap, SectionRemapingContainer, DestChunkBoneMap);
-
 
 				// get the material for this section
 				int32 MaterialIndex = Section.MaterialIndex;
@@ -179,8 +150,8 @@ static void GenerateNewSectionArray(USkeletalMesh* SrcMesh,
 }
 
 template <typename VertexDataType>
-void CopyVertexFromSource(VertexDataType& DestVert, const FSkeletalMeshLODRenderData& SrcLODData,
-	int32 SourceVertIdx, const FCMSkeletalMeshMerge::FCMMergeSectionInfo& MergeSectionInfo)
+void CopyVertexFromSource(VertexDataType& DestVert, const FSkeletalMeshLODRenderData& SrcLODData, int32 SourceVertIdx,
+	const FCMSkeletalMeshMerge::FCMMergeSectionInfo& MergeSectionInfo)
 {
 	/**Find vertex right index */
 	FVector Offset = FVector::ZeroVector;
@@ -510,16 +481,39 @@ static void GenerateLODModel(USkeletalMesh* MergeMesh, USkeletalMesh* SourceMesh
 	MergeLODData.MultiSizeIndexContainer.RebuildIndexBuffer(DataTypeSize, MergedIndexBuffer);
 }
 
+static void InitializeSkeleton(USkeletalMesh* MergeMesh, USkeletalMesh* SrcMesh)
+{
+	FReferenceSkeleton RefSkeleton;
+
+	// Iterate through all the source mesh reference skeletons and compose the merged reference skeleton.
+	FReferenceSkeletonModifier RefSkelModifier(RefSkeleton, MergeMesh->GetSkeleton());
+	if (!SrcMesh)
+	{
+		return;
+	}
+
+	// Initialise new RefSkeleton with first mesh.
+	if (RefSkeleton.GetRawBoneNum() == 0)
+	{
+		RefSkeleton = SrcMesh->GetRefSkeleton();
+	}
+
+	MergeMesh->SetRefSkeleton(RefSkeleton);
+	MergeMesh->GetRefBasesInvMatrix().Empty();
+	MergeMesh->CalculateInvRefMatrices();
+}
+
 void FRuntimeSkeletalMeshGenerator::GenerateSkeletalMesh(
 	USkeletalMesh* SkeletalMesh,
 	USkeletalMesh* SourceMesh,
 	TArray<FMeshSurface>& Surfaces,
 	const TArray<UMaterialInterface*>& SurfacesMaterial,
-	const TArray<int32>& RemapingBones,
 	const TMap<FName, FTransform>& BoneTransformsOverride)
 {
 	// Waits the rendering thread has done.
 	FlushRenderingCommands();
+
+	InitializeSkeleton(SkeletalMesh, SourceMesh);
 
 	constexpr int32 LODIndex = 0;
 
@@ -749,6 +743,29 @@ void FRuntimeSkeletalMeshGenerator::GenerateSkeletalMesh(
 		SkeletalMesh->GetMaterials().Add(Material);
 	}
 
+	/**Create remap*/
+	TArray<int32> RemapingBones;
+	if (SkeletalMesh)
+	{
+		RemapingBones.AddUninitialized(SkeletalMesh->GetRefSkeleton().GetRawBoneNum());
+
+		for (int32 i = 0; i < SourceMesh->GetRefSkeleton().GetRawBoneNum(); i++)
+		{
+			FName SrcBoneName = SourceMesh->GetRefSkeleton().GetBoneName(i);
+			int32 DestBoneIndex = SkeletalMesh->GetRefSkeleton().FindBoneIndex(SrcBoneName);
+
+			if (DestBoneIndex == INDEX_NONE)
+			{
+				// Missing bones shouldn't be possible, but can happen with invalid meshes;
+				// map any bone we are missing to the 'root'.
+
+				DestBoneIndex = 0;
+			}
+
+			RemapingBones[i] = DestBoneIndex;
+		}
+	}
+
 	// Array of per-lod number of UV sets
 	TArray<uint32> PerLODNumUVSets;
 	TArray<uint32> PerLODMaxBoneInfluences;
@@ -759,7 +776,6 @@ void FRuntimeSkeletalMeshGenerator::GenerateSkeletalMesh(
 
 	// Get the number of UV sets for each LOD.
 	FSkeletalMeshRenderData* SrcResource = SourceMesh->GetResourceForRendering();
-
 	for (int32 LODIdx = 0; LODIdx < 1; LODIdx++)
 	{
 		if (SrcResource->LODRenderData.IsValidIndex(LODIdx))

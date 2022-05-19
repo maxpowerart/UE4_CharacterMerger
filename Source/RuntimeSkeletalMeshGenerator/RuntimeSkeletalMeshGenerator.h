@@ -61,7 +61,6 @@ public: // ----------------------------------------------------------------- API
 		USkeletalMesh* SourceMesh,
 		TArray<FMeshSurface>& Surfaces,
 		const TArray<UMaterialInterface*>& SurfacesMaterial,
-		const TArray<int32>& RemapingBones,
 		const TMap<FName, FTransform>& BoneTransformsOverride = TMap<FName, FTransform>());
 
 	/**

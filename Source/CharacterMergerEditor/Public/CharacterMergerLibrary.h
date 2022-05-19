@@ -317,67 +317,48 @@ public:
 		if (ComponentsToWeld.Num() == 0) return;
 
 		FString SaveName = DefaultRoot + DefaultSavePath + DefaultSaveName;
-		TArray<USkeletalMesh*>& SourceMeshList = ComponentsToWeld;
 		UPackage* Package = CreatePackage( *SaveName);
 
-		USkeletalMesh* CompositeMesh = NewObject<USkeletalMesh>();
-		CompositeMesh->PreEditChange(NULL);
+		TArray<USkeletalMesh*> MorphedMeshes;
+		for(USkeletalMesh* MeshToDecompose : ComponentsToWeld)
+		{
+			USkeletalMesh* RecomposedMesh = NewObject<USkeletalMesh>();
+			RecomposedMesh->PreEditChange(NULL);
+			RecomposedMesh->SetRefSkeleton(MeshToDecompose->GetSkeleton()->GetReferenceSkeleton());
+			RecomposedMesh->SetSkeleton(MeshToDecompose->GetSkeleton());
+			
+			/**Decompose meshes*/
+			TArray<FMeshSurface> Surfaces;
+			TArray<int32> SurfacesVertexOffsets;
+			TArray<int32> SurfacesIndexOffsets;
+			TArray<UMaterialInterface*> SurfacesMaterial;
+			FRuntimeSkeletalMeshGenerator::DecomposeSkeletalMesh(MeshToDecompose, Surfaces, SurfacesVertexOffsets, SurfacesIndexOffsets, SurfacesMaterial);
+			//ParseMorphs(MeshToDecompose, Surfaces[0]);
+
+			FRuntimeSkeletalMeshGenerator::GenerateSkeletalMesh(RecomposedMesh, MeshToDecompose, Surfaces, SurfacesMaterial);
+			MorphedMeshes.Add(RecomposedMesh);
+		}
+
+		USkeletalMesh* CompositeMesh = NewObject<USkeletalMesh>(Package, NAME_None, RF_Public | RF_Standalone);
 		CompositeMesh->SetRefSkeleton(ComponentsToWeld[0]->GetSkeleton()->GetReferenceSkeleton());
 		CompositeMesh->SetSkeleton(ComponentsToWeld[0]->GetSkeleton());
 		
 		TArray<FSkelMeshMergeSectionMapping> InForceSectionMapping;
-		FSkeletalMeshMerge MeshMergeUtil(CompositeMesh, SourceMeshList, InForceSectionMapping, 0);
+		FSkeletalMeshMerge MeshMergeUtil(CompositeMesh, MorphedMeshes, InForceSectionMapping, 0);
 		if (!MeshMergeUtil.DoMerge())
 		{
 			return;
 		}
+
 		// Retrieve the imported resource structure and allocate a new LOD model
-		FSkeletalMeshModel* ImportedModel = CompositeMesh->GetImportedModel();
+		/*FSkeletalMeshModel* ImportedModel = CompositeMesh->GetImportedModel();
 		check(ImportedModel->LODModels.Num() == 0);
 		ImportedModel->LODModels.Empty();
 		ImportedModel->EmptyOriginalReductionSourceMeshData();
 		ImportedModel->LODModels.Add(new FSkeletalMeshLODModel());
 		CompositeMesh->ResetLODInfo();
-		CompositeMesh->AddLODInfo();
-
+		CompositeMesh->AddLODInfo();*/
 		
-		/**Decompose meshes*/
-		TArray<FMeshSurface> Surfaces;
-		TArray<int32> SurfacesVertexOffsets;
-		TArray<int32> SurfacesIndexOffsets;
-		TArray<UMaterialInterface*> SurfacesMaterial;
-		FRuntimeSkeletalMeshGenerator::DecomposeSkeletalMesh(CompositeMesh, Surfaces, SurfacesVertexOffsets, SurfacesIndexOffsets, SurfacesMaterial);
-		ParseMorphs(ComponentsToWeld[0], Surfaces[0]);
-
-		USkeletalMesh* RecompositeMesh = NewObject<USkeletalMesh>(Package, NAME_None, RF_Public | RF_Standalone);
-		RecompositeMesh->SetRefSkeleton(ComponentsToWeld[0]->GetSkeleton()->GetReferenceSkeleton());
-		RecompositeMesh->SetSkeleton(ComponentsToWeld[0]->GetSkeleton());
-
-		/**Calc remapping for new skeleton*/
-		TArray<int32> Remapping;
-		if (CompositeMesh)
-		{
-			Remapping.AddUninitialized(CompositeMesh->GetRefSkeleton().GetRawBoneNum());
-
-			for (int32 i = 0; i < CompositeMesh->GetRefSkeleton().GetRawBoneNum(); i++)
-			{
-				FName SrcBoneName = CompositeMesh->GetRefSkeleton().GetBoneName(i);
-				int32 DestBoneIndex = RecompositeMesh->GetRefSkeleton().FindBoneIndex(SrcBoneName);
-
-				if (DestBoneIndex == INDEX_NONE)
-				{
-					// Missing bones shouldn't be possible, but can happen with invalid meshes;
-					// map any bone we are missing to the 'root'.
-
-					DestBoneIndex = 0;
-				}
-
-				Remapping[i] = DestBoneIndex;
-			}
-		}
-		
-		FRuntimeSkeletalMeshGenerator::GenerateSkeletalMesh(RecompositeMesh, CompositeMesh, Surfaces, SurfacesMaterial, Remapping);
-
 		/**Save*/
 		Package->SetDirtyFlag(true);
 		UEditorLoadingAndSavingUtils::SaveDirtyPackages(false, true);
