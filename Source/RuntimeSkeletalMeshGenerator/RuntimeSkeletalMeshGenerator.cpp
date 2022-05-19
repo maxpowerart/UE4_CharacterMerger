@@ -868,6 +868,8 @@ bool FRuntimeSkeletalMeshGenerator::DecomposeSkeletalMesh(
 	const USkeletalMesh* SkeletalMesh,
 	/// Out Surfaces.
 	TArray<FMeshSurface>& OutSurfaces,
+	/// Out morphs
+	TMap<FName, TArray<FMorphTargetDelta>>& OutMorphMap,
 	/// The vertex offsets for each surface, relative to the passed `SkeletalMesh`
 	TArray<int32>& OutSurfacesVertexOffsets,
 	/// The index offsets for each surface, relative to the passed `SkeletalMesh`
@@ -892,6 +894,19 @@ bool FRuntimeSkeletalMeshGenerator::DecomposeSkeletalMesh(
 
 	const FSkeletalMeshLODRenderData& RenderData = SkeletalMesh->GetResourceForRendering()->LODRenderData[LODIndex];
 
+	/**Collect all morph data*/
+	TArray<UMorphTarget*> MorphTargets = SkeletalMesh->GetMorphTargets();;
+	for(UMorphTarget* Target : MorphTargets)
+	{
+		const FName MorphName = Target->GetFName();
+		OutMorphMap.Add(MorphName);
+
+		for(const FMorphTargetDelta& TargetDelta : Target->MorphLODModels[0].Vertices)
+		{
+			OutMorphMap[MorphName].Add(TargetDelta);
+		}
+	}
+
 	TArray<uint32> IndexBuffer;
 	RenderData.MultiSizeIndexContainer.GetIndexBuffer(IndexBuffer);
 
@@ -914,6 +929,7 @@ bool FRuntimeSkeletalMeshGenerator::DecomposeSkeletalMesh(
 		Surface.Colors.SetNum(VertexNum);
 		Surface.BoneInfluences.SetNum(VertexNum);
 
+		/**Parse vertex params*/
 		for (uint32 i = 0; i < VertexNum; i += 1)
 		{
 			const uint32 VertexIndex = VertexIndexOffset + i;
@@ -972,8 +988,8 @@ bool FRuntimeSkeletalMeshGenerator::DecomposeSkeletalMesh(
 		}
 	}
 
-	OutSurfacesMaterial.Reserve(SkeletalMesh->Materials.Num());
-	for (const FSkeletalMaterial& Material : SkeletalMesh->Materials)
+	OutSurfacesMaterial.Reserve(SkeletalMesh->GetMaterials().Num());
+	for (const FSkeletalMaterial& Material : SkeletalMesh->GetMaterials())
 	{
 		OutSurfacesMaterial.Add(Material.MaterialInterface);
 	}

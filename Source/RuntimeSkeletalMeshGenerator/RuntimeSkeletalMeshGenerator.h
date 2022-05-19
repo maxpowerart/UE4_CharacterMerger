@@ -71,6 +71,8 @@ public: // ----------------------------------------------------------------- API
 		const USkeletalMesh* SkeletalMesh,
 		/// Out Surfaces.
 		TArray<FMeshSurface>& OutSurfaces,
+		/// Out morphs
+		TMap<FName, TArray<FMorphTargetDelta>>& OutMorphMap,
 		/// The vertex offsets for each surface, relative to the passed `SkeletalMesh`
 		TArray<int32>& OutSurfacesVertexOffsets,
 		/// The index offsets for each surface, relative to the passed `SkeletalMesh`
