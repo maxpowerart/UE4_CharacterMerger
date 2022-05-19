@@ -37,6 +37,7 @@ public class CharacterMerger : ModuleRules
 				"CoreUObject",
 				"Engine",
 				"Slate",
+				"RenderCore",
 				"SlateCore",
 				// ... add private dependencies that you statically link with here ...	
 			}

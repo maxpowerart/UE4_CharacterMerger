@@ -5,14 +5,22 @@
 #include "CharacterMergerCommands.h"
 #include "CharacterMergerLibrary.h"
 #include "ContentBrowserModule.h"
+#include "FileHelpers.h"
+#include "IAssetTools.h"
+#include "IContentBrowserDataModule.h"
 #include "IContentBrowserSingleton.h"
 #include "LevelEditor.h"
+#include "PackageHelperFunctions.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Viewport/SCharacterMergerViewport.h"
 #include "Widgets/Docking/SDockTab.h"
 
 #define LOCTEXT_NAMESPACE "FCharacterMergerModule"
 
 static const FName CharacterMergerTabName("CharacterMerger");
+static const FString DefaultRoot = "/Game/";
+static const FString DefaultSavePath = "MergedSource/";
+static const FString DefaultSaveName = "SK_MERGED_MergedStaticMesh";
 
 void FCharacterMergerEditorModule::StartupModule()
 {
@@ -52,23 +60,39 @@ void FCharacterMergerEditorModule::PluginButtonClicked()
 	FGlobalTabmanager::Get()->TryInvokeTab(CharacterMergerTabName);
 }
 
-FReply FCharacterMergerEditorModule::CompareRig()
-{
-	FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
-	TArray<FAssetData> SelectedAssets;
-	ContentBrowserModule.Get().GetSelectedAssets(SelectedAssets);
-	auto Source = Cast<USkeletalMesh>(SelectedAssets[0].GetAsset());
-	auto Target = Cast<USkeletalMesh>(SelectedAssets[1].GetAsset());
-	FCharacterMergerLibrary::CompareMeshRigging(Source, Target);
-	return FReply::Handled();
-}
-
 FReply FCharacterMergerEditorModule::OnMergeRequested()
 {
 	TArray<USkeletalMesh*> Components = ViewportPtr->GetMeshes();
-	if(Components.Num() >= 2)
+	if(Components.Num() > 0)
 	{
-		FCharacterMergerLibrary::MergeRequest(Components);
+		IContentBrowserSingleton& ContentBrowser = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser").Get();
+		FSaveAssetDialogConfig SaveAssetDialogConfig;
+		SaveAssetDialogConfig.DefaultAssetName = DefaultSaveName;
+		SaveAssetDialogConfig.DefaultPath = DefaultRoot + DefaultSavePath;
+		
+		FOnObjectPathChosenForSave OnPathChosen;
+		OnPathChosen.BindLambda([&, Components](const FString& ChosenPath)
+		{
+			/**Make package*/
+			FString SaveName = DefaultRoot + DefaultSavePath + DefaultSaveName;
+			UPackage* Package = CreatePackage( *SaveName);
+			check(Package);
+			Package->FullyLoad();
+			Package->Modify();
+			
+			/**Get mesh*/
+			FCharacterMergerLibrary::MergeRequest(Components, Package);
+			
+			/**Save*/
+			Package->MarkPackageDirty();
+			UEditorLoadingAndSavingUtils::SaveDirtyPackages(false, true);
+		});
+		FOnAssetDialogCancelled OnCanceled;
+		OnCanceled.BindLambda([&]()
+		{
+			/**Destroy*/
+		});
+		ContentBrowser.CreateSaveAssetDialog(SaveAssetDialogConfig, OnPathChosen, OnCanceled);
 	}
 	return FReply::Handled();
 }
@@ -191,15 +215,6 @@ TSharedRef<SDockTab> FCharacterMergerEditorModule::SpawnTab_Toolbar(const FSpawn
 				.VAlign(VAlign_Center)
 				.Text(FText::FromString("Merge"))
 				.OnClicked_Raw(this, &FCharacterMergerEditorModule::OnMergeRequested)
-			]
-
-			+SHorizontalBox::Slot()
-			[
-				SNew(SButton)
-				.HAlign(HAlign_Center)
-				.VAlign(VAlign_Center)
-				.Text(FText::FromString("Compare two selected SK meshes' skinning"))
-				.OnClicked_Raw(this, &FCharacterMergerEditorModule::CompareRig)
 			]
 		];
 }

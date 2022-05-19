@@ -30,8 +30,7 @@ public class CharacterMergerEditor : ModuleRules
 				"EditorStyle",
 				"EditorSubsystem",
 				"AdvancedPreviewScene",
-				"UnrealEd", 
-				"RuntimeSkeletalMeshGenerator"
+				"UnrealEd",
 				// ... add other public dependencies that you statically link with here ...
 			}
 			);
@@ -43,6 +42,7 @@ public class CharacterMergerEditor : ModuleRules
 				"CoreUObject",
 				"Engine",
 				"Slate",
+				"CharacterMerger",
 				"SlateCore",
 				"Landscape",
 				"InputCore",

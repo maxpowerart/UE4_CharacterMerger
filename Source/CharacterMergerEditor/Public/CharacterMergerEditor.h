@@ -16,9 +16,6 @@ public:
 	/** This function will be bound to Command (by default it will bring up plugin window) */
 	void PluginButtonClicked();
 
-	/** This function will be bound to Command (by default it will bring up plugin window) */
-	FReply CompareRig();
-
 	FReply OnMergeRequested();
 	
 private:

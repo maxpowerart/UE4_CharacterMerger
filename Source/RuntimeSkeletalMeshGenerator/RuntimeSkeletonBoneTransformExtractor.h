@@ -6,7 +6,7 @@ struct FReferenceSkeleton;
 
 /// Utility to fetch the bone world transform.
 /// Eventually you can pose the skeleton before extracting the final Bone transform.
-class RUNTIMESKELETALMESHGENERATOR_API FRuntimeSkeletonBoneTransformExtractor
+class FRuntimeSkeletonBoneTransformExtractor
 {
 	const FReferenceSkeleton& RefSkeleton;
 	TArray<FMatrix> GlobalBoneTransforms;

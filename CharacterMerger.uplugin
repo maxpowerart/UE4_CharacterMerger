@@ -23,8 +23,12 @@
 		{
 			"Name": "CharacterMergerEditor",
 			"Type": "Editor",
-			"LoadingPhase": "PostEngineInit"
-		},		{
+			"LoadingPhase": "PostEngineInit",
+			"AdditionalDependencies": [
+				"CharacterMerger"
+			]
+		},		
+		{
 			"Name": "RuntimeSkeletalMeshGenerator",
 			"Type": "Runtime",
 			"LoadingPhase": "PreEarlyLoadingScreen"

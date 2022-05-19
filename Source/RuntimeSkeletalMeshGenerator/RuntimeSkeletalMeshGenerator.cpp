@@ -11,8 +11,6 @@
 /* `USkeletalMeshComponent`.                                                  */
 /******************************************************************************/
 #include "RuntimeSkeletalMeshGenerator.h"
-
-#include "CharacterMergerEditor/Public/CharacterMergerLibrary.h"
 #include "Rendering/SkeletalMeshLODModel.h"
 #include "Rendering/SkeletalMeshModel.h"
 
@@ -24,484 +22,6 @@ void FRuntimeSkeletalMeshGeneratorModule::ShutdownModule()
 }
 
 IMPLEMENT_MODULE(FRuntimeSkeletalMeshGeneratorModule, RuntimeSkeletalMeshGenerator)
-
-static void MergeBoneMap(TArray<FBoneIndexType>& MergedBoneMap, TArray<FBoneIndexType>& BoneMapToMergedBoneMap, const TArray<FBoneIndexType>& BoneMap)
-{
-	BoneMapToMergedBoneMap.AddUninitialized( BoneMap.Num() );
-	for( int32 IdxB=0; IdxB < BoneMap.Num(); IdxB++ )
-	{
-		BoneMapToMergedBoneMap[IdxB] = MergedBoneMap.AddUnique( BoneMap[IdxB] );
-	}
-}
-static void BoneMapToNewRefSkel(const TArray<FBoneIndexType>& InBoneMap, const TArray<int32>& SrcToDestRefSkeletonMap, TArray<FBoneIndexType>& OutBoneMap)
-{
-	OutBoneMap.Empty();
-	OutBoneMap.AddUninitialized(InBoneMap.Num());
-
-	for(int32 i=0; i<InBoneMap.Num(); i++)
-	{
-		check(InBoneMap[i] < SrcToDestRefSkeletonMap.Num());
-		OutBoneMap[i] = SrcToDestRefSkeletonMap[InBoneMap[i]];
-	}
-}
-static void GenerateNewSectionArray(USkeletalMesh* SrcMesh, TArray<int32>& SectionRemapingContainer, TArray<FCMSkeletalMeshMerge::FCMNewSectionInfo>& NewSectionArray,
-	int32 LODIdx)
-{
-	const int32 MaxGPUSkinBones = FGPUBaseSkinVertexFactory::GetMaxGPUSkinBones();
-
-	NewSectionArray.Empty();
-	if( SrcMesh )
-		{
-			FSkeletalMeshRenderData* SrcResource = SrcMesh->GetResourceForRendering();
-			int32 SourceLODIdx = FMath::Min(LODIdx, SrcResource->LODRenderData.Num()-1);
-			FSkeletalMeshLODRenderData& SrcLODData = SrcResource->LODRenderData[SourceLODIdx];
-			FSkeletalMeshLODInfo& SrcLODInfo = *(SrcMesh->GetLODInfo(SourceLODIdx));
-
-			// iterate over each section of this LOD
-			for( int32 SectionIdx=0; SectionIdx < SrcLODData.RenderSections.Num(); SectionIdx++ )
-			{
-				int32 MaterialId = -1;
-				FSkelMeshRenderSection& Section = SrcLODData.RenderSections[SectionIdx];
-
-				// Convert Chunk.BoneMap from src to dest bone indices
-				TArray<FBoneIndexType> DestChunkBoneMap = Section.BoneMap;
-				BoneMapToNewRefSkel(Section.BoneMap, SectionRemapingContainer, DestChunkBoneMap);
-
-				// get the material for this section
-				int32 MaterialIndex = Section.MaterialIndex;
-				// use the remapping of material indices if there is a valid value
-				if(SrcLODInfo.LODMaterialMap.IsValidIndex(SectionIdx) && SrcLODInfo.LODMaterialMap[SectionIdx] != INDEX_NONE && SrcMesh->GetMaterials().Num() > 0)
-				{
-					MaterialIndex = FMath::Clamp<int32>( SrcLODInfo.LODMaterialMap[SectionIdx], 0, SrcMesh->GetMaterials().Num() - 1);
-				}
-
-				const FSkeletalMaterial& SkeletalMaterial = SrcMesh->GetMaterials()[MaterialIndex];
-				UMaterialInterface* Material = SkeletalMaterial.MaterialInterface;
-
-				// see if there is an existing entry in the array of new sections that matches its material
-				// if there is a match then the source section can be added to its list of sections to merge 
-				int32 FoundIdx = INDEX_NONE;
-				for( int32 Idx=0; Idx < NewSectionArray.Num(); Idx++ )
-				{
-					FCMSkeletalMeshMerge::FCMNewSectionInfo& NewSectionInfo = NewSectionArray[Idx];
-					// check for a matching material or a matching material index id if it is valid
-					if( (MaterialId == -1 && Material == NewSectionInfo.Material) ||
-						(MaterialId != -1 && MaterialId == NewSectionInfo.MaterialId) )
-					{
-						check(NewSectionInfo.MergeSections.Num());
-
-						// merge the bonemap from the source section with the existing merged bonemap
-						TArray<FBoneIndexType> TempMergedBoneMap(NewSectionInfo.MergedBoneMap);
-						TArray<FBoneIndexType> TempBoneMapToMergedBoneMap;									
-						MergeBoneMap(TempMergedBoneMap,TempBoneMapToMergedBoneMap,DestChunkBoneMap);
-
-						// check to see if the newly merged bonemap is still within the bone limit for GPU skinning
-						if( TempMergedBoneMap.Num() <= MaxGPUSkinBones )
-						{
-							TArray<FTransform> SrcUVTransform;
-							
-							// add the source section as a new merge entry
-							FCMSkeletalMeshMerge::FCMMergeSectionInfo& MergeSectionInfo = *new(NewSectionInfo.MergeSections) FCMSkeletalMeshMerge::FCMMergeSectionInfo(
-								SrcMesh,
-								&SrcLODData.RenderSections[SectionIdx],
-								SrcUVTransform
-								);
-							// keep track of remapping for the existing chunk's bonemap 
-							// so that the bone matrix indices can be updated for the vertices
-							MergeSectionInfo.BoneMapToMergedBoneMap = TempBoneMapToMergedBoneMap;
-
-							// use the updated bonemap for this new section
-							NewSectionInfo.MergedBoneMap = TempMergedBoneMap;
-
-							// keep track of the entry that was found
-							FoundIdx = Idx;
-							break;
-						}
-					}
-				}
-
-				// new section entries will be created if the material for the source section was not found 
-				// or merging it with an existing entry would go over the bone limit for GPU skinning
-				if( FoundIdx == INDEX_NONE )
-				{
-					// create a new section entry
-					const FName& MaterialSlotName = SkeletalMaterial.MaterialSlotName;
-					const FMeshUVChannelInfo& UVChannelData = SkeletalMaterial.UVChannelData;
-					FCMSkeletalMeshMerge::FCMNewSectionInfo& NewSectionInfo = *new(NewSectionArray) FCMSkeletalMeshMerge::FCMNewSectionInfo(Material, MaterialId, MaterialSlotName, UVChannelData);
-					// initialize the merged bonemap to simply use the original chunk bonemap
-					NewSectionInfo.MergedBoneMap = DestChunkBoneMap;
-
-					TArray<FTransform> SrcUVTransform;
-					
-					// add a new merge section entry
-					FCMSkeletalMeshMerge::FCMMergeSectionInfo& MergeSectionInfo = *new(NewSectionInfo.MergeSections) FCMSkeletalMeshMerge::FCMMergeSectionInfo(
-						SrcMesh,
-						&SrcLODData.RenderSections[SectionIdx],
-						SrcUVTransform);
-					// since merged bonemap == chunk.bonemap then remapping is just pass-through
-					MergeSectionInfo.BoneMapToMergedBoneMap.Empty( DestChunkBoneMap.Num() );
-					for( int32 i=0; i < DestChunkBoneMap.Num(); i++ )
-					{
-						MergeSectionInfo.BoneMapToMergedBoneMap.Add((FBoneIndexType)i);
-					}
-				}
-			}
-		}
-}
-
-template <typename VertexDataType>
-void CopyVertexFromSource(VertexDataType& DestVert, const FSkeletalMeshLODRenderData& SrcLODData, const TArray<FMeshSurface>& Surfaces, int32 SourceVertIdx,
-	const FCMSkeletalMeshMerge::FCMMergeSectionInfo& MergeSectionInfo)
-{
-	/**Find vertex right index */
-	//DestVert.Position = SrcLODData.StaticVertexBuffers.PositionVertexBuffer.VertexPosition(SourceVertIdx) ;
-	DestVert.Position = Surfaces[0].Vertices[SourceVertIdx];
-	DestVert.TangentX = SrcLODData.StaticVertexBuffers.StaticMeshVertexBuffer.VertexTangentX(SourceVertIdx);
-	DestVert.TangentZ = SrcLODData.StaticVertexBuffers.StaticMeshVertexBuffer.VertexTangentZ(SourceVertIdx);
-
-	// Copy all UVs that are available
-	uint32 LODNumTexCoords = SrcLODData.StaticVertexBuffers.StaticMeshVertexBuffer.GetNumTexCoords();
-	const uint32 ValidLoopCount = FMath::Min(VertexDataType::NumTexCoords, LODNumTexCoords);
-	for (uint32 UVIndex = 0; UVIndex < ValidLoopCount; ++UVIndex)
-	{
-		FVector2D UVs = SrcLODData.StaticVertexBuffers.StaticMeshVertexBuffer.GetVertexUV_Typed<VertexDataType::StaticMeshVertexUVType>(SourceVertIdx, UVIndex);
-		if (UVIndex < (uint32)MergeSectionInfo.UVTransforms.Num())
-		{
-			FVector Transformed = MergeSectionInfo.UVTransforms[UVIndex].TransformPosition(FVector(UVs, 1.f));
-			UVs = FVector2D(Transformed.X, Transformed.Y);
-		}
-		DestVert.UVs[UVIndex] = UVs;
-	}
-	
-	// now just fill up zero value if we didn't reach till end
-	for (uint32 UVIndex = ValidLoopCount; UVIndex < VertexDataType::NumTexCoords; ++UVIndex)
-	{
-		DestVert.UVs[UVIndex] = FVector2D::ZeroVector;
-	}
-}
-
-template <typename VertexDataType>
-static void GenerateLODModel(USkeletalMesh* MergeMesh, USkeletalMesh* SourceMesh, const TArray<FMeshSurface>& Surfaces, TArray<int32> SectionRemapping, int32 LODIdx)
-{
-	// add the new LOD model entry
-	FSkeletalMeshRenderData* MergeResource = MergeMesh->GetResourceForRendering();
-	check(MergeResource);
-
-	FSkeletalMeshLODRenderData& MergeLODData = *new FSkeletalMeshLODRenderData;
-	MergeResource->LODRenderData.Add(&MergeLODData);
-	// add the new LOD info entry
-	FSkeletalMeshLODInfo& MergeLODInfo = MergeMesh->AddLODInfo();
-	MergeLODInfo.ScreenSize = MergeLODInfo.LODHysteresis = MAX_FLT;
-
-	// generate an array with info about new sections that need to be created
-	TArray<FCMSkeletalMeshMerge::FCMNewSectionInfo> NewSectionArray;
-	GenerateNewSectionArray(SourceMesh, SectionRemapping, NewSectionArray, LODIdx );
-
-	uint32 MaxIndex = 0;
-
-	// merged vertex buffer
-	TArray< VertexDataType > MergedVertexBuffer;
-	// merged skin weight buffer
-	TArray< FSkinWeightInfo > MergedSkinWeightBuffer;
-	// merged vertex color buffer
-	TArray< FColor > MergedColorBuffer;
-	// merged index buffer
-	TArray<uint32> MergedIndexBuffer;
-
-	// The total number of UV sets for this LOD model
-	uint32 TotalNumUVs = 0;
-
-	uint32 SourceMaxBoneInfluences = 0;
-	bool bSourceUse16BitBoneIndex = false;
-
-	for( int32 CreateIdx=0; CreateIdx < NewSectionArray.Num(); CreateIdx++ )
-	{
-		FCMSkeletalMeshMerge::FCMNewSectionInfo& NewSectionInfo = NewSectionArray[CreateIdx];
-
-		// ActiveBoneIndices contains all the bones used by the verts from all the sections of this LOD model
-		// Add the bones used by this new section
-		for( int32 Idx=0; Idx < NewSectionInfo.MergedBoneMap.Num(); Idx++ )
-		{
-			MergeLODData.ActiveBoneIndices.AddUnique( NewSectionInfo.MergedBoneMap[Idx] );
-		}
-
-		// add the new section entry
-		FSkelMeshRenderSection& Section = *new(MergeLODData.RenderSections) FSkelMeshRenderSection;
-
-		// set the new bonemap from the merged sections
-		// these are the bones that will be used by this new section
-		Section.BoneMap = NewSectionInfo.MergedBoneMap;
-
-		// init vert totals
-		Section.NumVertices = 0;
-
-		// keep track of the current base vertex for this section in the merged vertex buffer
-		Section.BaseVertexIndex = MergedVertexBuffer.Num();
-		
-		// init tri totals
-		Section.NumTriangles = 0;
-		// keep track of the current base index for this section in the merged index buffer
-		Section.BaseIndex = MergedIndexBuffer.Num();
-
-		FMeshUVChannelInfo& MergedUVData = MergeMesh->GetMaterials()[Section.MaterialIndex].UVChannelData;
-
-		// iterate over all of the sections that need to be merged together
-		for( int32 MergeIdx=0; MergeIdx < NewSectionInfo.MergeSections.Num(); MergeIdx++ )
-		{
-			FCMSkeletalMeshMerge::FCMMergeSectionInfo& MergeSectionInfo = NewSectionInfo.MergeSections[MergeIdx];
-			int32 SourceLODIdx = FMath::Min(LODIdx, MergeSectionInfo.SkelMesh->GetResourceForRendering()->LODRenderData.Num()-1);
-
-			// Take the max UV density for each UVChannel between all sections that are being merged.
-			const int32 NewSectionMatId = MergeSectionInfo.Section->MaterialIndex;
-			if(MergeSectionInfo.SkelMesh->GetMaterials().IsValidIndex(NewSectionMatId))
-			{
-				const FMeshUVChannelInfo& NewSectionUVData = MergeSectionInfo.SkelMesh->GetMaterials()[NewSectionMatId].UVChannelData;
-				for (int32 i = 0; i < MAX_TEXCOORDS; i++)
-				{
-					const float NewSectionUVDensity = NewSectionUVData.LocalUVDensities[i];
-					float& UVDensity = MergedUVData.LocalUVDensities[i];
-
-					UVDensity = FMath::Max(UVDensity, NewSectionUVDensity);
-				}
-			}
-
-			// get the source skel LOD info from this merge entry
-			const FSkeletalMeshLODInfo& SrcLODInfo = *(MergeSectionInfo.SkelMesh->GetLODInfo(SourceLODIdx));
-
-			// keep track of the lowest LOD displayfactor and hysteresis
-			MergeLODInfo.ScreenSize.Default = FMath::Min<float>(MergeLODInfo.ScreenSize.Default, SrcLODInfo.ScreenSize.Default);
-#if WITH_EDITORONLY_DATA
-			for(const TPair<FName, float>& PerPlatform : SrcLODInfo.ScreenSize.PerPlatform)
-			{
-				float* Value = MergeLODInfo.ScreenSize.PerPlatform.Find(PerPlatform.Key);
-				if(Value)
-				{
-					*Value = FMath::Min<float>(PerPlatform.Value, *Value);	
-				}
-				else
-				{
-					MergeLODInfo.ScreenSize.PerPlatform.Add(PerPlatform.Key, PerPlatform.Value);
-				}
-			}
-#endif
-			MergeLODInfo.BuildSettings.bUseFullPrecisionUVs |= SrcLODInfo.BuildSettings.bUseFullPrecisionUVs;
-			MergeLODInfo.BuildSettings.bUseHighPrecisionTangentBasis |= SrcLODInfo.BuildSettings.bUseHighPrecisionTangentBasis;
-
-			MergeLODInfo.LODHysteresis = FMath::Min<float>(MergeLODInfo.LODHysteresis,SrcLODInfo.LODHysteresis);
-
-			// get the source skel LOD model from this merge entry
-			const FSkeletalMeshLODRenderData& SrcLODData = MergeSectionInfo.SkelMesh->GetResourceForRendering()->LODRenderData[SourceLODIdx];
-
-			// add required bones from this source model entry to the merge model entry
-			for( int32 Idx=0; Idx < SrcLODData.RequiredBones.Num(); Idx++ )
-			{
-				FName SrcLODBoneName = MergeSectionInfo.SkelMesh->GetRefSkeleton().GetBoneName(SrcLODData.RequiredBones[Idx] );
-				int32 MergeBoneIndex = MergeMesh->GetRefSkeleton().FindBoneIndex(SrcLODBoneName);
-				
-				if (MergeBoneIndex != INDEX_NONE)
-				{
-					MergeLODData.RequiredBones.AddUnique(MergeBoneIndex);
-				}
-			}
-
-			// update vert total
-			Section.NumVertices += MergeSectionInfo.Section->NumVertices;
-
-			// update total number of vertices 
-			int32 NumTotalVertices = MergeSectionInfo.Section->NumVertices;
-
-			// add the vertices from the original source mesh to the merged vertex buffer					
-			int32 MaxVertIdx = FMath::Min<int32>( 
-				MergeSectionInfo.Section->BaseVertexIndex + NumTotalVertices,
-				SrcLODData.StaticVertexBuffers.PositionVertexBuffer.GetNumVertices()
-				);
-
-			int32 MaxColorIdx = SrcLODData.StaticVertexBuffers.ColorVertexBuffer.GetNumVertices();
-
-			// keep track of the current base vertex index before adding any new vertices
-			// this will be needed to remap the index buffer values to the new range
-			int32 CurrentBaseVertexIndex = MergedVertexBuffer.Num();
-			const uint32 MaxBoneInfluences = SrcLODData.GetSkinWeightVertexBuffer()->GetMaxBoneInfluences();
-			const bool bUse16BitBoneIndex = SrcLODData.GetSkinWeightVertexBuffer()->Use16BitBoneIndex();
-			for( int32 VertIdx=MergeSectionInfo.Section->BaseVertexIndex; VertIdx < MaxVertIdx; VertIdx++ )
-			{
-				// add the new vertex
-				VertexDataType& DestVert = MergedVertexBuffer[MergedVertexBuffer.AddUninitialized()];
-				FSkinWeightInfo& DestWeight = MergedSkinWeightBuffer[MergedSkinWeightBuffer.AddUninitialized()];
-
-				CopyVertexFromSource<VertexDataType>(DestVert, SrcLODData, Surfaces, VertIdx, MergeSectionInfo);
-
-				SourceMaxBoneInfluences = FMath::Max(SourceMaxBoneInfluences, MaxBoneInfluences);
-				bSourceUse16BitBoneIndex |= bUse16BitBoneIndex;
-				DestWeight = SrcLODData.GetSkinWeightVertexBuffer()->GetVertexSkinWeights(VertIdx);
-
-				// if the mesh uses vertex colors, copy the source color if possible or default to white
-				if( MergeMesh->GetHasVertexColors() )
-				{
-					if( VertIdx < MaxColorIdx )
-					{
-						const FColor& SrcColor = SrcLODData.StaticVertexBuffers.ColorVertexBuffer.VertexColor(VertIdx);
-						MergedColorBuffer.Add(SrcColor);
-					}
-					else
-					{
-						const FColor ColorWhite(255, 255, 255);
-						MergedColorBuffer.Add(ColorWhite);
-					}
-				}
-
-				uint32 LODNumTexCoords = SrcLODData.StaticVertexBuffers.StaticMeshVertexBuffer.GetNumTexCoords();
-				if( TotalNumUVs < LODNumTexCoords )
-				{
-					TotalNumUVs = LODNumTexCoords;
-				}
-
-				// remap the bone index used by this vertex to match the mergedbonemap 
-				for( uint32 Idx=0; Idx < MAX_TOTAL_INFLUENCES; Idx++ )
-				{
-					if (DestWeight.InfluenceWeights[Idx] > 0)
-					{
-						checkSlow(MergeSectionInfo.BoneMapToMergedBoneMap.IsValidIndex(DestWeight.InfluenceBones[Idx]));
-						DestWeight.InfluenceBones[Idx] = (uint8)MergeSectionInfo.BoneMapToMergedBoneMap[DestWeight.InfluenceBones[Idx]];
-					}
-				}
-			}
-
-			// update total number of triangles
-			Section.NumTriangles += MergeSectionInfo.Section->NumTriangles;
-
-			// add the indices from the original source mesh to the merged index buffer					
-			int32 MaxIndexIdx = FMath::Min<int32>( 
-				MergeSectionInfo.Section->BaseIndex + MergeSectionInfo.Section->NumTriangles * 3, 
-				SrcLODData.MultiSizeIndexContainer.GetIndexBuffer()->Num()
-				);
-            for (int32 IndexIdx = MergeSectionInfo.Section->BaseIndex; IndexIdx < MaxIndexIdx; IndexIdx++)
-            {
-                uint32 SrcIndex = SrcLODData.MultiSizeIndexContainer.GetIndexBuffer()->Get(IndexIdx);
-
-                // add offset to each index to match the new entries in the merged vertex buffer
-                checkSlow(SrcIndex >= MergeSectionInfo.Section->BaseVertexIndex);
-                uint32 DstIndex = SrcIndex - MergeSectionInfo.Section->BaseVertexIndex + CurrentBaseVertexIndex;
-                checkSlow(DstIndex < (uint32)MergedVertexBuffer.Num());
-
-                // add the new index to the merged vertex buffer
-                MergedIndexBuffer.Add(DstIndex);
-                if (MaxIndex < DstIndex)
-                {
-                    MaxIndex = DstIndex;
-                }
-
-            }
-
-            {
-                if (MergeSectionInfo.Section->DuplicatedVerticesBuffer.bHasOverlappingVertices)
-                {
-                    if (Section.DuplicatedVerticesBuffer.bHasOverlappingVertices)
-                    {
-                        // Merge
-                        int32 StartIndex = Section.DuplicatedVerticesBuffer.DupVertData.Num();
-                        int32 StartVertex = Section.DuplicatedVerticesBuffer.DupVertIndexData.Num();
-                        Section.DuplicatedVerticesBuffer.DupVertData.ResizeBuffer(StartIndex + MergeSectionInfo.Section->DuplicatedVerticesBuffer.DupVertData.Num());
-                        Section.DuplicatedVerticesBuffer.DupVertIndexData.ResizeBuffer(Section.NumVertices);
-                    
-                        uint8* VertData = Section.DuplicatedVerticesBuffer.DupVertData.GetDataPointer();
-                        uint8* IndexData = Section.DuplicatedVerticesBuffer.DupVertIndexData.GetDataPointer();
-                        for (int32 i = StartIndex; i < Section.DuplicatedVerticesBuffer.DupVertData.Num(); ++i)
-                        {
-                            *((uint32*)(VertData + i * sizeof(uint32))) += CurrentBaseVertexIndex - MergeSectionInfo.Section->BaseVertexIndex;
-                        }
-                        for (uint32 i = StartVertex; i < Section.NumVertices; ++i)
-                        {
-                            ((FIndexLengthPair*)(IndexData + i * sizeof(FIndexLengthPair)))->Index += StartIndex;
-                        }
-                    }
-                    else
-                    {
-                        Section.DuplicatedVerticesBuffer.DupVertData = MergeSectionInfo.Section->DuplicatedVerticesBuffer.DupVertData;
-                        Section.DuplicatedVerticesBuffer.DupVertIndexData = MergeSectionInfo.Section->DuplicatedVerticesBuffer.DupVertIndexData;
-                        uint8* VertData = Section.DuplicatedVerticesBuffer.DupVertData.GetDataPointer();
-                        for (int32 i = 0; i < Section.DuplicatedVerticesBuffer.DupVertData.Num(); ++i)
-                        {
-                            *((uint32*)(VertData + i * sizeof(uint32))) += CurrentBaseVertexIndex - MergeSectionInfo.Section->BaseVertexIndex;
-                        }
-                    }
-                    Section.DuplicatedVerticesBuffer.bHasOverlappingVertices = true;
-                }
-                else
-                {
-                    Section.DuplicatedVerticesBuffer.DupVertData.ResizeBuffer(1);
-                    Section.DuplicatedVerticesBuffer.DupVertIndexData.ResizeBuffer(Section.NumVertices);
-
-                    uint8* VertData = Section.DuplicatedVerticesBuffer.DupVertData.GetDataPointer();
-                    uint8* IndexData = Section.DuplicatedVerticesBuffer.DupVertIndexData.GetDataPointer();
-                    
-                    FMemory::Memzero(IndexData, Section.NumVertices * sizeof(FIndexLengthPair));
-                    FMemory::Memzero(VertData, sizeof(uint32));
-                }
-            }
-		}
-	}
-
-    const bool bNeedsCPUAccess = true;
-
-	// sort required bone array in strictly increasing order
-	MergeLODData.RequiredBones.Sort();
-	MergeMesh->GetRefSkeleton().EnsureParentsExistAndSort(MergeLODData.ActiveBoneIndices);
-	
-	// copy the new vertices and indices to the vertex buffer for the new model
-	MergeLODData.StaticVertexBuffers.StaticMeshVertexBuffer.SetUseFullPrecisionUVs(MergeLODInfo.BuildSettings.bUseFullPrecisionUVs);
-
-	MergeLODData.StaticVertexBuffers.PositionVertexBuffer.Init(MergedVertexBuffer.Num(), bNeedsCPUAccess);
-	MergeLODData.StaticVertexBuffers.StaticMeshVertexBuffer.Init(MergedVertexBuffer.Num(), TotalNumUVs, bNeedsCPUAccess);
-
-	for (int i = 0; i < MergedVertexBuffer.Num(); i++)
-	{
-		MergeLODData.StaticVertexBuffers.PositionVertexBuffer.VertexPosition(i) = MergedVertexBuffer[i].Position;
-		MergeLODData.StaticVertexBuffers.StaticMeshVertexBuffer.SetVertexTangents(i, MergedVertexBuffer[i].TangentX.ToFVector(), MergedVertexBuffer[i].GetTangentY(), MergedVertexBuffer[i].TangentZ.ToFVector());
-		for (uint32 j = 0; j < TotalNumUVs; j++)
-		{
-			MergeLODData.StaticVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(i, j, MergedVertexBuffer[i].UVs[j]);
-		}
-	}
-
-	MergeLODData.SkinWeightVertexBuffer.SetMaxBoneInfluences(SourceMaxBoneInfluences);
-	MergeLODData.SkinWeightVertexBuffer.SetUse16BitBoneIndex(bSourceUse16BitBoneIndex);
-	MergeLODData.SkinWeightVertexBuffer.SetNeedsCPUAccess(bNeedsCPUAccess);
-
-	// copy vertex resource arrays
-	MergeLODData.SkinWeightVertexBuffer = MergedSkinWeightBuffer;
-
-	if( MergeMesh->GetHasVertexColors() )
-	{
-		MergeLODData.StaticVertexBuffers.ColorVertexBuffer.InitFromColorArray(MergedColorBuffer);
-	}
-
-	
-	const uint8 DataTypeSize = (MaxIndex < MAX_uint16) ? sizeof(uint16) : sizeof(uint32);
-	MergeLODData.MultiSizeIndexContainer.RebuildIndexBuffer(DataTypeSize, MergedIndexBuffer);
-}
-
-static void InitializeSkeleton(USkeletalMesh* MergeMesh, USkeletalMesh* SrcMesh)
-{
-	FReferenceSkeleton RefSkeleton;
-
-	// Iterate through all the source mesh reference skeletons and compose the merged reference skeleton.
-	FReferenceSkeletonModifier RefSkelModifier(RefSkeleton, MergeMesh->GetSkeleton());
-	if (!SrcMesh)
-	{
-		return;
-	}
-
-	// Initialise new RefSkeleton with first mesh.
-	if (RefSkeleton.GetRawBoneNum() == 0)
-	{
-		RefSkeleton = SrcMesh->GetRefSkeleton();
-	}
-
-	MergeMesh->SetRefSkeleton(RefSkeleton);
-	MergeMesh->GetRefBasesInvMatrix().Empty();
-	MergeMesh->CalculateInvRefMatrices();
-}
 
 void FRuntimeSkeletalMeshGenerator::GenerateSkeletalMesh(
 	USkeletalMesh* SkeletalMesh,
@@ -995,4 +515,481 @@ bool FRuntimeSkeletalMeshGenerator::DecomposeSkeletalMesh(
 	}
 
 	return true;
+}
+
+void FRuntimeSkeletalMeshGenerator::MergeBoneMap(TArray<FBoneIndexType>& MergedBoneMap, TArray<FBoneIndexType>& BoneMapToMergedBoneMap, const TArray<FBoneIndexType>& BoneMap)
+{
+	BoneMapToMergedBoneMap.AddUninitialized( BoneMap.Num() );
+	for( int32 IdxB=0; IdxB < BoneMap.Num(); IdxB++ )
+	{
+		BoneMapToMergedBoneMap[IdxB] = MergedBoneMap.AddUnique( BoneMap[IdxB] );
+	}
+}
+void FRuntimeSkeletalMeshGenerator::BoneMapToNewRefSkel(const TArray<FBoneIndexType>& InBoneMap, const TArray<int32>& SrcToDestRefSkeletonMap, TArray<FBoneIndexType>& OutBoneMap)
+{
+	OutBoneMap.Empty();
+	OutBoneMap.AddUninitialized(InBoneMap.Num());
+
+	for(int32 i=0; i<InBoneMap.Num(); i++)
+	{
+		check(InBoneMap[i] < SrcToDestRefSkeletonMap.Num());
+		OutBoneMap[i] = SrcToDestRefSkeletonMap[InBoneMap[i]];
+	}
+}
+void FRuntimeSkeletalMeshGenerator::GenerateNewSectionArray(USkeletalMesh* SrcMesh, TArray<int32>& SectionRemapingContainer, TArray<FCMNewSectionInfo>& NewSectionArray,
+	int32 LODIdx)
+{
+	const int32 MaxGPUSkinBones = FGPUBaseSkinVertexFactory::GetMaxGPUSkinBones();
+
+	NewSectionArray.Empty();
+	if( SrcMesh )
+		{
+			FSkeletalMeshRenderData* SrcResource = SrcMesh->GetResourceForRendering();
+			int32 SourceLODIdx = FMath::Min(LODIdx, SrcResource->LODRenderData.Num()-1);
+			FSkeletalMeshLODRenderData& SrcLODData = SrcResource->LODRenderData[SourceLODIdx];
+			FSkeletalMeshLODInfo& SrcLODInfo = *(SrcMesh->GetLODInfo(SourceLODIdx));
+
+			// iterate over each section of this LOD
+			for( int32 SectionIdx=0; SectionIdx < SrcLODData.RenderSections.Num(); SectionIdx++ )
+			{
+				int32 MaterialId = -1;
+				FSkelMeshRenderSection& Section = SrcLODData.RenderSections[SectionIdx];
+
+				// Convert Chunk.BoneMap from src to dest bone indices
+				TArray<FBoneIndexType> DestChunkBoneMap = Section.BoneMap;
+				BoneMapToNewRefSkel(Section.BoneMap, SectionRemapingContainer, DestChunkBoneMap);
+
+				// get the material for this section
+				int32 MaterialIndex = Section.MaterialIndex;
+				// use the remapping of material indices if there is a valid value
+				if(SrcLODInfo.LODMaterialMap.IsValidIndex(SectionIdx) && SrcLODInfo.LODMaterialMap[SectionIdx] != INDEX_NONE && SrcMesh->GetMaterials().Num() > 0)
+				{
+					MaterialIndex = FMath::Clamp<int32>( SrcLODInfo.LODMaterialMap[SectionIdx], 0, SrcMesh->GetMaterials().Num() - 1);
+				}
+
+				const FSkeletalMaterial& SkeletalMaterial = SrcMesh->GetMaterials()[MaterialIndex];
+				UMaterialInterface* Material = SkeletalMaterial.MaterialInterface;
+
+				// see if there is an existing entry in the array of new sections that matches its material
+				// if there is a match then the source section can be added to its list of sections to merge 
+				int32 FoundIdx = INDEX_NONE;
+				for( int32 Idx=0; Idx < NewSectionArray.Num(); Idx++ )
+				{
+					FCMNewSectionInfo& NewSectionInfo = NewSectionArray[Idx];
+					// check for a matching material or a matching material index id if it is valid
+					if( (MaterialId == -1 && Material == NewSectionInfo.Material) ||
+						(MaterialId != -1 && MaterialId == NewSectionInfo.MaterialId) )
+					{
+						check(NewSectionInfo.MergeSections.Num());
+
+						// merge the bonemap from the source section with the existing merged bonemap
+						TArray<FBoneIndexType> TempMergedBoneMap(NewSectionInfo.MergedBoneMap);
+						TArray<FBoneIndexType> TempBoneMapToMergedBoneMap;									
+						MergeBoneMap(TempMergedBoneMap,TempBoneMapToMergedBoneMap,DestChunkBoneMap);
+
+						// check to see if the newly merged bonemap is still within the bone limit for GPU skinning
+						if( TempMergedBoneMap.Num() <= MaxGPUSkinBones )
+						{
+							TArray<FTransform> SrcUVTransform;
+							
+							// add the source section as a new merge entry
+							FCMMergeSectionInfo& MergeSectionInfo = *new(NewSectionInfo.MergeSections) FCMMergeSectionInfo(
+								SrcMesh,
+								&SrcLODData.RenderSections[SectionIdx],
+								SrcUVTransform
+								);
+							// keep track of remapping for the existing chunk's bonemap 
+							// so that the bone matrix indices can be updated for the vertices
+							MergeSectionInfo.BoneMapToMergedBoneMap = TempBoneMapToMergedBoneMap;
+
+							// use the updated bonemap for this new section
+							NewSectionInfo.MergedBoneMap = TempMergedBoneMap;
+
+							// keep track of the entry that was found
+							FoundIdx = Idx;
+							break;
+						}
+					}
+				}
+
+				// new section entries will be created if the material for the source section was not found 
+				// or merging it with an existing entry would go over the bone limit for GPU skinning
+				if( FoundIdx == INDEX_NONE )
+				{
+					// create a new section entry
+					const FName& MaterialSlotName = SkeletalMaterial.MaterialSlotName;
+					const FMeshUVChannelInfo& UVChannelData = SkeletalMaterial.UVChannelData;
+					FCMNewSectionInfo& NewSectionInfo = *new(NewSectionArray) FCMNewSectionInfo(Material, MaterialId, MaterialSlotName, UVChannelData);
+					// initialize the merged bonemap to simply use the original chunk bonemap
+					NewSectionInfo.MergedBoneMap = DestChunkBoneMap;
+
+					TArray<FTransform> SrcUVTransform;
+					
+					// add a new merge section entry
+					FCMMergeSectionInfo& MergeSectionInfo = *new(NewSectionInfo.MergeSections) FCMMergeSectionInfo(
+						SrcMesh,
+						&SrcLODData.RenderSections[SectionIdx],
+						SrcUVTransform);
+					// since merged bonemap == chunk.bonemap then remapping is just pass-through
+					MergeSectionInfo.BoneMapToMergedBoneMap.Empty( DestChunkBoneMap.Num() );
+					for( int32 i=0; i < DestChunkBoneMap.Num(); i++ )
+					{
+						MergeSectionInfo.BoneMapToMergedBoneMap.Add((FBoneIndexType)i);
+					}
+				}
+			}
+		}
+}
+
+template <typename VertexDataType>
+void FRuntimeSkeletalMeshGenerator::CopyVertexFromSource(VertexDataType& DestVert, const FSkeletalMeshLODRenderData& SrcLODData, const TArray<FMeshSurface>& Surfaces, int32 SourceVertIdx,
+	const FCMMergeSectionInfo& MergeSectionInfo)
+{
+	/**Find vertex right index */
+	//DestVert.Position = SrcLODData.StaticVertexBuffers.PositionVertexBuffer.VertexPosition(SourceVertIdx) ;
+	DestVert.Position = Surfaces[0].Vertices[SourceVertIdx];
+	DestVert.TangentX = SrcLODData.StaticVertexBuffers.StaticMeshVertexBuffer.VertexTangentX(SourceVertIdx);
+	DestVert.TangentZ = SrcLODData.StaticVertexBuffers.StaticMeshVertexBuffer.VertexTangentZ(SourceVertIdx);
+
+	// Copy all UVs that are available
+	uint32 LODNumTexCoords = SrcLODData.StaticVertexBuffers.StaticMeshVertexBuffer.GetNumTexCoords();
+	const uint32 ValidLoopCount = FMath::Min(VertexDataType::NumTexCoords, LODNumTexCoords);
+	for (uint32 UVIndex = 0; UVIndex < ValidLoopCount; ++UVIndex)
+	{
+		FVector2D UVs = SrcLODData.StaticVertexBuffers.StaticMeshVertexBuffer.GetVertexUV_Typed<VertexDataType::StaticMeshVertexUVType>(SourceVertIdx, UVIndex);
+		if (UVIndex < (uint32)MergeSectionInfo.UVTransforms.Num())
+		{
+			FVector Transformed = MergeSectionInfo.UVTransforms[UVIndex].TransformPosition(FVector(UVs, 1.f));
+			UVs = FVector2D(Transformed.X, Transformed.Y);
+		}
+		DestVert.UVs[UVIndex] = UVs;
+	}
+	
+	// now just fill up zero value if we didn't reach till end
+	for (uint32 UVIndex = ValidLoopCount; UVIndex < VertexDataType::NumTexCoords; ++UVIndex)
+	{
+		DestVert.UVs[UVIndex] = FVector2D::ZeroVector;
+	}
+}
+
+template <typename VertexDataType>
+void FRuntimeSkeletalMeshGenerator::GenerateLODModel(USkeletalMesh* MergeMesh, USkeletalMesh* SourceMesh, const TArray<FMeshSurface>& Surfaces, TArray<int32> SectionRemapping, int32 LODIdx)
+{
+	// add the new LOD model entry
+	FSkeletalMeshRenderData* MergeResource = MergeMesh->GetResourceForRendering();
+	check(MergeResource);
+
+	FSkeletalMeshLODRenderData& MergeLODData = *new FSkeletalMeshLODRenderData;
+	MergeResource->LODRenderData.Add(&MergeLODData);
+	// add the new LOD info entry
+	FSkeletalMeshLODInfo& MergeLODInfo = MergeMesh->AddLODInfo();
+	MergeLODInfo.ScreenSize = MergeLODInfo.LODHysteresis = MAX_FLT;
+
+	// generate an array with info about new sections that need to be created
+	TArray<FCMNewSectionInfo> NewSectionArray;
+	GenerateNewSectionArray(SourceMesh, SectionRemapping, NewSectionArray, LODIdx );
+
+	uint32 MaxIndex = 0;
+
+	// merged vertex buffer
+	TArray< VertexDataType > MergedVertexBuffer;
+	// merged skin weight buffer
+	TArray< FSkinWeightInfo > MergedSkinWeightBuffer;
+	// merged vertex color buffer
+	TArray< FColor > MergedColorBuffer;
+	// merged index buffer
+	TArray<uint32> MergedIndexBuffer;
+
+	// The total number of UV sets for this LOD model
+	uint32 TotalNumUVs = 0;
+
+	uint32 SourceMaxBoneInfluences = 0;
+	bool bSourceUse16BitBoneIndex = false;
+
+	for( int32 CreateIdx=0; CreateIdx < NewSectionArray.Num(); CreateIdx++ )
+	{
+		FCMNewSectionInfo& NewSectionInfo = NewSectionArray[CreateIdx];
+
+		// ActiveBoneIndices contains all the bones used by the verts from all the sections of this LOD model
+		// Add the bones used by this new section
+		for( int32 Idx=0; Idx < NewSectionInfo.MergedBoneMap.Num(); Idx++ )
+		{
+			MergeLODData.ActiveBoneIndices.AddUnique( NewSectionInfo.MergedBoneMap[Idx] );
+		}
+
+		// add the new section entry
+		FSkelMeshRenderSection& Section = *new(MergeLODData.RenderSections) FSkelMeshRenderSection;
+
+		// set the new bonemap from the merged sections
+		// these are the bones that will be used by this new section
+		Section.BoneMap = NewSectionInfo.MergedBoneMap;
+
+		// init vert totals
+		Section.NumVertices = 0;
+
+		// keep track of the current base vertex for this section in the merged vertex buffer
+		Section.BaseVertexIndex = MergedVertexBuffer.Num();
+		
+		// init tri totals
+		Section.NumTriangles = 0;
+		// keep track of the current base index for this section in the merged index buffer
+		Section.BaseIndex = MergedIndexBuffer.Num();
+
+		FMeshUVChannelInfo& MergedUVData = MergeMesh->GetMaterials()[Section.MaterialIndex].UVChannelData;
+
+		// iterate over all of the sections that need to be merged together
+		for( int32 MergeIdx=0; MergeIdx < NewSectionInfo.MergeSections.Num(); MergeIdx++ )
+		{
+			FCMMergeSectionInfo& MergeSectionInfo = NewSectionInfo.MergeSections[MergeIdx];
+			int32 SourceLODIdx = FMath::Min(LODIdx, MergeSectionInfo.SkelMesh->GetResourceForRendering()->LODRenderData.Num()-1);
+
+			// Take the max UV density for each UVChannel between all sections that are being merged.
+			const int32 NewSectionMatId = MergeSectionInfo.Section->MaterialIndex;
+			if(MergeSectionInfo.SkelMesh->GetMaterials().IsValidIndex(NewSectionMatId))
+			{
+				const FMeshUVChannelInfo& NewSectionUVData = MergeSectionInfo.SkelMesh->GetMaterials()[NewSectionMatId].UVChannelData;
+				for (int32 i = 0; i < MAX_TEXCOORDS; i++)
+				{
+					const float NewSectionUVDensity = NewSectionUVData.LocalUVDensities[i];
+					float& UVDensity = MergedUVData.LocalUVDensities[i];
+
+					UVDensity = FMath::Max(UVDensity, NewSectionUVDensity);
+				}
+			}
+
+			// get the source skel LOD info from this merge entry
+			const FSkeletalMeshLODInfo& SrcLODInfo = *(MergeSectionInfo.SkelMesh->GetLODInfo(SourceLODIdx));
+
+			// keep track of the lowest LOD displayfactor and hysteresis
+			MergeLODInfo.ScreenSize.Default = FMath::Min<float>(MergeLODInfo.ScreenSize.Default, SrcLODInfo.ScreenSize.Default);
+#if WITH_EDITORONLY_DATA
+			for(const TPair<FName, float>& PerPlatform : SrcLODInfo.ScreenSize.PerPlatform)
+			{
+				float* Value = MergeLODInfo.ScreenSize.PerPlatform.Find(PerPlatform.Key);
+				if(Value)
+				{
+					*Value = FMath::Min<float>(PerPlatform.Value, *Value);	
+				}
+				else
+				{
+					MergeLODInfo.ScreenSize.PerPlatform.Add(PerPlatform.Key, PerPlatform.Value);
+				}
+			}
+#endif
+			MergeLODInfo.BuildSettings.bUseFullPrecisionUVs |= SrcLODInfo.BuildSettings.bUseFullPrecisionUVs;
+			MergeLODInfo.BuildSettings.bUseHighPrecisionTangentBasis |= SrcLODInfo.BuildSettings.bUseHighPrecisionTangentBasis;
+
+			MergeLODInfo.LODHysteresis = FMath::Min<float>(MergeLODInfo.LODHysteresis,SrcLODInfo.LODHysteresis);
+
+			// get the source skel LOD model from this merge entry
+			const FSkeletalMeshLODRenderData& SrcLODData = MergeSectionInfo.SkelMesh->GetResourceForRendering()->LODRenderData[SourceLODIdx];
+
+			// add required bones from this source model entry to the merge model entry
+			for( int32 Idx=0; Idx < SrcLODData.RequiredBones.Num(); Idx++ )
+			{
+				FName SrcLODBoneName = MergeSectionInfo.SkelMesh->GetRefSkeleton().GetBoneName(SrcLODData.RequiredBones[Idx] );
+				int32 MergeBoneIndex = MergeMesh->GetRefSkeleton().FindBoneIndex(SrcLODBoneName);
+				
+				if (MergeBoneIndex != INDEX_NONE)
+				{
+					MergeLODData.RequiredBones.AddUnique(MergeBoneIndex);
+				}
+			}
+
+			// update vert total
+			Section.NumVertices += MergeSectionInfo.Section->NumVertices;
+
+			// update total number of vertices 
+			int32 NumTotalVertices = MergeSectionInfo.Section->NumVertices;
+
+			// add the vertices from the original source mesh to the merged vertex buffer					
+			int32 MaxVertIdx = FMath::Min<int32>( 
+				MergeSectionInfo.Section->BaseVertexIndex + NumTotalVertices,
+				SrcLODData.StaticVertexBuffers.PositionVertexBuffer.GetNumVertices()
+				);
+
+			int32 MaxColorIdx = SrcLODData.StaticVertexBuffers.ColorVertexBuffer.GetNumVertices();
+
+			// keep track of the current base vertex index before adding any new vertices
+			// this will be needed to remap the index buffer values to the new range
+			int32 CurrentBaseVertexIndex = MergedVertexBuffer.Num();
+			const uint32 MaxBoneInfluences = SrcLODData.GetSkinWeightVertexBuffer()->GetMaxBoneInfluences();
+			const bool bUse16BitBoneIndex = SrcLODData.GetSkinWeightVertexBuffer()->Use16BitBoneIndex();
+			for( int32 VertIdx=MergeSectionInfo.Section->BaseVertexIndex; VertIdx < MaxVertIdx; VertIdx++ )
+			{
+				// add the new vertex
+				VertexDataType& DestVert = MergedVertexBuffer[MergedVertexBuffer.AddUninitialized()];
+				FSkinWeightInfo& DestWeight = MergedSkinWeightBuffer[MergedSkinWeightBuffer.AddUninitialized()];
+
+				CopyVertexFromSource<VertexDataType>(DestVert, SrcLODData, Surfaces, VertIdx, MergeSectionInfo);
+
+				SourceMaxBoneInfluences = FMath::Max(SourceMaxBoneInfluences, MaxBoneInfluences);
+				bSourceUse16BitBoneIndex |= bUse16BitBoneIndex;
+				DestWeight = SrcLODData.GetSkinWeightVertexBuffer()->GetVertexSkinWeights(VertIdx);
+
+				// if the mesh uses vertex colors, copy the source color if possible or default to white
+				if( MergeMesh->GetHasVertexColors() )
+				{
+					if( VertIdx < MaxColorIdx )
+					{
+						const FColor& SrcColor = SrcLODData.StaticVertexBuffers.ColorVertexBuffer.VertexColor(VertIdx);
+						MergedColorBuffer.Add(SrcColor);
+					}
+					else
+					{
+						const FColor ColorWhite(255, 255, 255);
+						MergedColorBuffer.Add(ColorWhite);
+					}
+				}
+
+				uint32 LODNumTexCoords = SrcLODData.StaticVertexBuffers.StaticMeshVertexBuffer.GetNumTexCoords();
+				if( TotalNumUVs < LODNumTexCoords )
+				{
+					TotalNumUVs = LODNumTexCoords;
+				}
+
+				// remap the bone index used by this vertex to match the mergedbonemap 
+				for( uint32 Idx=0; Idx < MAX_TOTAL_INFLUENCES; Idx++ )
+				{
+					if (DestWeight.InfluenceWeights[Idx] > 0)
+					{
+						checkSlow(MergeSectionInfo.BoneMapToMergedBoneMap.IsValidIndex(DestWeight.InfluenceBones[Idx]));
+						DestWeight.InfluenceBones[Idx] = (uint8)MergeSectionInfo.BoneMapToMergedBoneMap[DestWeight.InfluenceBones[Idx]];
+					}
+				}
+			}
+
+			// update total number of triangles
+			Section.NumTriangles += MergeSectionInfo.Section->NumTriangles;
+
+			// add the indices from the original source mesh to the merged index buffer					
+			int32 MaxIndexIdx = FMath::Min<int32>( 
+				MergeSectionInfo.Section->BaseIndex + MergeSectionInfo.Section->NumTriangles * 3, 
+				SrcLODData.MultiSizeIndexContainer.GetIndexBuffer()->Num()
+				);
+            for (int32 IndexIdx = MergeSectionInfo.Section->BaseIndex; IndexIdx < MaxIndexIdx; IndexIdx++)
+            {
+                uint32 SrcIndex = SrcLODData.MultiSizeIndexContainer.GetIndexBuffer()->Get(IndexIdx);
+
+                // add offset to each index to match the new entries in the merged vertex buffer
+                checkSlow(SrcIndex >= MergeSectionInfo.Section->BaseVertexIndex);
+                uint32 DstIndex = SrcIndex - MergeSectionInfo.Section->BaseVertexIndex + CurrentBaseVertexIndex;
+                checkSlow(DstIndex < (uint32)MergedVertexBuffer.Num());
+
+                // add the new index to the merged vertex buffer
+                MergedIndexBuffer.Add(DstIndex);
+                if (MaxIndex < DstIndex)
+                {
+                    MaxIndex = DstIndex;
+                }
+
+            }
+
+            {
+                if (MergeSectionInfo.Section->DuplicatedVerticesBuffer.bHasOverlappingVertices)
+                {
+                    if (Section.DuplicatedVerticesBuffer.bHasOverlappingVertices)
+                    {
+                        // Merge
+                        int32 StartIndex = Section.DuplicatedVerticesBuffer.DupVertData.Num();
+                        int32 StartVertex = Section.DuplicatedVerticesBuffer.DupVertIndexData.Num();
+                        Section.DuplicatedVerticesBuffer.DupVertData.ResizeBuffer(StartIndex + MergeSectionInfo.Section->DuplicatedVerticesBuffer.DupVertData.Num());
+                        Section.DuplicatedVerticesBuffer.DupVertIndexData.ResizeBuffer(Section.NumVertices);
+                    
+                        uint8* VertData = Section.DuplicatedVerticesBuffer.DupVertData.GetDataPointer();
+                        uint8* IndexData = Section.DuplicatedVerticesBuffer.DupVertIndexData.GetDataPointer();
+                        for (int32 i = StartIndex; i < Section.DuplicatedVerticesBuffer.DupVertData.Num(); ++i)
+                        {
+                            *((uint32*)(VertData + i * sizeof(uint32))) += CurrentBaseVertexIndex - MergeSectionInfo.Section->BaseVertexIndex;
+                        }
+                        for (uint32 i = StartVertex; i < Section.NumVertices; ++i)
+                        {
+                            ((FIndexLengthPair*)(IndexData + i * sizeof(FIndexLengthPair)))->Index += StartIndex;
+                        }
+                    }
+                    else
+                    {
+                        Section.DuplicatedVerticesBuffer.DupVertData = MergeSectionInfo.Section->DuplicatedVerticesBuffer.DupVertData;
+                        Section.DuplicatedVerticesBuffer.DupVertIndexData = MergeSectionInfo.Section->DuplicatedVerticesBuffer.DupVertIndexData;
+                        uint8* VertData = Section.DuplicatedVerticesBuffer.DupVertData.GetDataPointer();
+                        for (int32 i = 0; i < Section.DuplicatedVerticesBuffer.DupVertData.Num(); ++i)
+                        {
+                            *((uint32*)(VertData + i * sizeof(uint32))) += CurrentBaseVertexIndex - MergeSectionInfo.Section->BaseVertexIndex;
+                        }
+                    }
+                    Section.DuplicatedVerticesBuffer.bHasOverlappingVertices = true;
+                }
+                else
+                {
+                    Section.DuplicatedVerticesBuffer.DupVertData.ResizeBuffer(1);
+                    Section.DuplicatedVerticesBuffer.DupVertIndexData.ResizeBuffer(Section.NumVertices);
+
+                    uint8* VertData = Section.DuplicatedVerticesBuffer.DupVertData.GetDataPointer();
+                    uint8* IndexData = Section.DuplicatedVerticesBuffer.DupVertIndexData.GetDataPointer();
+                    
+                    FMemory::Memzero(IndexData, Section.NumVertices * sizeof(FIndexLengthPair));
+                    FMemory::Memzero(VertData, sizeof(uint32));
+                }
+            }
+		}
+	}
+
+    const bool bNeedsCPUAccess = true;
+
+	// sort required bone array in strictly increasing order
+	MergeLODData.RequiredBones.Sort();
+	MergeMesh->GetRefSkeleton().EnsureParentsExistAndSort(MergeLODData.ActiveBoneIndices);
+	
+	// copy the new vertices and indices to the vertex buffer for the new model
+	MergeLODData.StaticVertexBuffers.StaticMeshVertexBuffer.SetUseFullPrecisionUVs(MergeLODInfo.BuildSettings.bUseFullPrecisionUVs);
+
+	MergeLODData.StaticVertexBuffers.PositionVertexBuffer.Init(MergedVertexBuffer.Num(), bNeedsCPUAccess);
+	MergeLODData.StaticVertexBuffers.StaticMeshVertexBuffer.Init(MergedVertexBuffer.Num(), TotalNumUVs, bNeedsCPUAccess);
+
+	for (int i = 0; i < MergedVertexBuffer.Num(); i++)
+	{
+		MergeLODData.StaticVertexBuffers.PositionVertexBuffer.VertexPosition(i) = MergedVertexBuffer[i].Position;
+		MergeLODData.StaticVertexBuffers.StaticMeshVertexBuffer.SetVertexTangents(i, MergedVertexBuffer[i].TangentX.ToFVector(), MergedVertexBuffer[i].GetTangentY(), MergedVertexBuffer[i].TangentZ.ToFVector());
+		for (uint32 j = 0; j < TotalNumUVs; j++)
+		{
+			MergeLODData.StaticVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(i, j, MergedVertexBuffer[i].UVs[j]);
+		}
+	}
+
+	MergeLODData.SkinWeightVertexBuffer.SetMaxBoneInfluences(SourceMaxBoneInfluences);
+	MergeLODData.SkinWeightVertexBuffer.SetUse16BitBoneIndex(bSourceUse16BitBoneIndex);
+	MergeLODData.SkinWeightVertexBuffer.SetNeedsCPUAccess(bNeedsCPUAccess);
+
+	// copy vertex resource arrays
+	MergeLODData.SkinWeightVertexBuffer = MergedSkinWeightBuffer;
+
+	if( MergeMesh->GetHasVertexColors() )
+	{
+		MergeLODData.StaticVertexBuffers.ColorVertexBuffer.InitFromColorArray(MergedColorBuffer);
+	}
+
+	
+	const uint8 DataTypeSize = (MaxIndex < MAX_uint16) ? sizeof(uint16) : sizeof(uint32);
+	MergeLODData.MultiSizeIndexContainer.RebuildIndexBuffer(DataTypeSize, MergedIndexBuffer);
+}
+void FRuntimeSkeletalMeshGenerator::InitializeSkeleton(USkeletalMesh* MergeMesh, USkeletalMesh* SrcMesh)
+{
+	FReferenceSkeleton RefSkeleton;
+
+	// Iterate through all the source mesh reference skeletons and compose the merged reference skeleton.
+	FReferenceSkeletonModifier RefSkelModifier(RefSkeleton, MergeMesh->GetSkeleton());
+	if (!SrcMesh)
+	{
+		return;
+	}
+
+	// Initialise new RefSkeleton with first mesh.
+	if (RefSkeleton.GetRawBoneNum() == 0)
+	{
+		RefSkeleton = SrcMesh->GetRefSkeleton();
+	}
+
+	MergeMesh->SetRefSkeleton(RefSkeleton);
+	MergeMesh->GetRefBasesInvMatrix().Empty();
+	MergeMesh->CalculateInvRefMatrices();
 }
