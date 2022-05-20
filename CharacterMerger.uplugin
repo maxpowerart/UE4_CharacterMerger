@@ -27,11 +27,6 @@
 			"AdditionalDependencies": [
 				"CharacterMerger"
 			]
-		},		
-		{
-			"Name": "RuntimeSkeletalMeshGenerator",
-			"Type": "Runtime",
-			"LoadingPhase": "PreEarlyLoadingScreen"
 		}
 	]
 }

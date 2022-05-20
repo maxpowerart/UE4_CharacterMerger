@@ -22,6 +22,13 @@ USkeletalMesh* FCharacterMergerLibrary::MergeRequest(const TArray<USkeletalMesh*
 	{
 		ParseMorphs(ComponentsToWeld[It], CompositeMesh, It);
 	}
+	
+	/**Wait until render thread complete commands*/
+	FlushRenderingCommands();
+
+	/**Init morph targets on target mesh*/
+	CompositeMesh->GetResourceForRendering()->ReleaseResources();
+	CompositeMesh->InitResources();
 	return CompositeMesh;
 }
 
@@ -124,12 +131,6 @@ void FCharacterMergerLibrary::ParseMorphs(USkeletalMesh* Source, USkeletalMesh* 
 	}
 	MorphTargetObjects.Append(Target->GetMorphTargets());
 
-	/**Wait until render thread complete commands*/
-	FlushRenderingCommands();
-
-	/**Init morph targets on target mesh*/
 	Target->SetMorphTargets(MorphTargetObjects);
 	Target->InitMorphTargets();
-	Target->GetResourceForRendering()->ReleaseResources();
-	Target->InitResources();
 }
