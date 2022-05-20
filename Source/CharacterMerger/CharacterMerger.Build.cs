@@ -39,6 +39,7 @@ public class CharacterMerger : ModuleRules
 				"Slate",
 				"RenderCore",
 				"SlateCore",
+				"RHI"
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);
